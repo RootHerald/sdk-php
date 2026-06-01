@@ -1,0 +1,32 @@
+name: Release
+
+# Packagist auto-discovers new tags via the GitHub webhook. After the first
+# publish, push a v*.*.* tag and Packagist will index the new version.
+# This workflow runs tests once more on tag and creates a GitHub Release
+# with a changelog.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: openssl, json, mbstring
+
+      - run: composer install --prefer-dist --no-progress
+
+      - run: vendor/bin/phpunit
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
