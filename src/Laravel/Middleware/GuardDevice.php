@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Rootherald\Laravel\Middleware;
 
 use Closure;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Rootherald\Client;
 use Rootherald\Exceptions\TokenExpiredException;
@@ -37,22 +38,22 @@ class GuardDevice
     {
         $token = $this->extractToken($request);
         if ($token === null) {
-            return response()->json(['error' => 'missing_attestation_token'], 401);
+            return new JsonResponse(['error' => 'missing_attestation_token'], 401);
         }
 
         try {
             $claims = $this->client->verifyToken($token);
         } catch (TokenExpiredException) {
-            return response()->json(['error' => 'token_expired'], 401);
+            return new JsonResponse(['error' => 'token_expired'], 401);
         } catch (VerificationException $e) {
-            return response()->json(['error' => 'token_invalid', 'message' => $e->getMessage()], 401);
+            return new JsonResponse(['error' => 'token_invalid', 'message' => $e->getMessage()], 401);
         }
 
         if ($claims->verdict === Verdict::DENY) {
-            return response()->json(['error' => 'device_denied', 'action' => $action], 403);
+            return new JsonResponse(['error' => 'device_denied', 'action' => $action], 403);
         }
         if ($mode === 'strict' && $claims->verdict === Verdict::WARN) {
-            return response()->json(['error' => 'device_warned', 'action' => $action], 403);
+            return new JsonResponse(['error' => 'device_warned', 'action' => $action], 403);
         }
 
         $request->attributes->set('rootherald_claims', $claims);
