@@ -1,0 +1,54 @@
+{
+    "name": "rootherald/rootherald",
+    "description": "Root Herald server SDK for PHP — verifies attestation tokens and CAEP webhook events.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": ["attestation", "tpm", "jwt", "jwks", "caep", "rootherald", "security", "laravel", "symfony"],
+    "homepage": "https://rootherald.io",
+    "support": {
+        "docs": "https://rootherald.io/developers/sdks/php",
+        "source": "https://github.com/rootherald/rootherald",
+        "issues": "https://github.com/rootherald/rootherald/issues"
+    },
+    "authors": [
+        {
+            "name": "Root Herald",
+            "email": "hello@rootherald.io",
+            "homepage": "https://rootherald.io"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*",
+        "ext-openssl": "*",
+        "firebase/php-jwt": "^6.10"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "laravel/framework": "^10.0 || ^11.0",
+        "symfony/framework-bundle": "^6.4 || ^7.0",
+        "symfony/http-kernel": "^6.4 || ^7.0"
+    },
+    "suggest": {
+        "laravel/framework": "Required for the Laravel middleware integration (^10 || ^11).",
+        "symfony/framework-bundle": "Required for the Symfony event subscriber (^6.4 || ^7)."
+    },
+    "autoload": {
+        "psr-4": {
+            "Rootherald\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Rootherald\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
