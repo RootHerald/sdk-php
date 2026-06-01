@@ -10,7 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        php: ['8.1', '8.2', '8.3']
+        # Laravel 11 + Symfony 7 require PHP >=8.2; only test on supported PHP.
+        # Add 8.1 back if/when we relax those dev-dep constraints.
+        php: ['8.2', '8.3']
     steps:
       - uses: actions/checkout@v4
 
