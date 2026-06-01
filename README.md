@@ -1,67 +1,96 @@
-# Root Herald — PHP SDK
+# rootherald/rootherald (PHP)
 
-Backend SDK for verifying [Root Herald](https://rootherald.io) device attestation JWTs from PHP applications. Includes Laravel integration.
-
-## Install
+Root Herald server SDK for PHP 8.1+. Verifies attestation token JWTs and
+CAEP webhook events (SET JWTs) against the Root Herald JWKS. Pure PHP —
+only requires `ext-openssl` and `firebase/php-jwt`.
 
 ```bash
 composer require rootherald/rootherald
 ```
 
-Requires PHP 8.1 or later.
-
-## 30-second integration (plain PHP)
+## Usage
 
 ```php
-<?php
-use RootHerald\Client;
+use Rootherald\Client;
+use Rootherald\Verdict;
 
-$client = new Client([
-    'issuer' => 'https://api.rootherald.io',
-    'audience' => 'plat_your_client_id',
-]);
+$client = new Client(
+    issuer: 'https://rootherald.io/myorg',
+    jwksUri: 'https://rootherald.io/.well-known/jwks.json',
+);
+$claims = $client->verifyToken($token);
 
-$verdict = $client->verifyToken($_SERVER['HTTP_AUTHORIZATION'] ?? '');
-
-if ($verdict->device->verdict !== 'pass') {
-    http_response_code(403);
-    exit('device check failed');
+if ($claims->verdict === Verdict::ALLOW) {
+    // proceed with signup
 }
+```
 
-echo "device: " . $verdict->device->deviceId;
+`$claims` exposes:
+
+- `$claims->subject` — stable user UUID
+- `$claims->acr`, `$claims->amr`, `$claims->authTime` — OIDC claims
+- `$claims->deviceId` (`rootherald_device.ueid`)
+- `$claims->tpmClass`, `$claims->platform`, `$claims->attestationType`
+- `$claims->earStatus` and `$claims->verdict` (`Verdict::ALLOW`/`WARN`/`DENY`)
+- `$claims->raw` — full verified payload
+
+## Webhook verification
+
+```php
+$event = $client->verifySet($request->getContent());
+
+if ($event->eventType === 'https://schemas.openid.net/secevent/caep/event-type/device-compliance-change') {
+    updateDevice($event->deviceId, $event->eventPayload);
+}
+return new Response('', 202);
 ```
 
 ## Laravel integration
 
 ```php
-// config/rootherald.php
-return [
-    'issuer' => env('ROOTHERALD_ISSUER', 'https://api.rootherald.io'),
-    'audience' => env('ROOTHERALD_AUDIENCE'),
-];
+// config/app.php (or via auto-discovery)
+'providers' => [
+    Rootherald\Laravel\RootheraldServiceProvider::class,
+],
+
+// routes/api.php
+Route::post('/signup', SignupController::class)
+    ->middleware(['rootherald.guard:signup']);
+
+// Inside the controller:
+$claims = request()->attributes->get('rootherald_claims');
 ```
 
-```php
-// routes/web.php
-Route::middleware('rootherald.attest')->get('/me', function () {
-    return ['device' => rh_verdict()->device->deviceId];
-});
+## Symfony integration
+
+Register `\Rootherald\Symfony\EventSubscriber\RootheraldSubscriber` in your
+services configuration; opt routes in by setting the `_rootherald_action`
+attribute (via a controller attribute or route default).
+
+## WordPress
+
+See [`samples/wordpress-plugin`](samples/wordpress-plugin) for a single-file
+plugin that blocks user registration without a valid attestation token.
+
+## Errors
+
+All exceptions extend `\Rootherald\Exceptions\RootheraldException`:
+
+- `TokenExpiredException` — `exp` is in the past
+- `VerificationException` — signature / issuer / audience / schema fail
+- `WebhookSignatureException` — SET JWT verification failed
+- `JwksException` — JWKS could not be fetched / parsed
+- `HttpException` — Root Herald REST API returned non-2xx
+
+## Tests
+
+```bash
+composer install
+vendor/bin/phpunit
 ```
 
-See [`samples/laravel-demo`](./samples/laravel-demo) for a full working example.
-
-## What you get
-
-- `RootHerald\Client` — JWKS-cached token verifier
-- `rh_verdict()` helper inside Laravel routes/controllers
-- `rootherald.attest` middleware for gating routes
-- Strongly-typed `AttestationVerdict` and `DeviceVerdict` value objects
-- `WebhookVerifier` for CAEP webhook signature checks
-
-## Trust chain
-
-The SDK fetches Root Herald's signing keys from `{issuer}/.well-known/jwks.json` and caches them (default 1 hour). Verification is offline after the first key fetch.
-
-## License
-
-MIT. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Tests cover the same edge-case matrix as the other Root Herald SDKs:
+happy path, expired token, wrong issuer/audience, missing required
+claim, bad EAT profile, unknown kid, tampered signature, `alg: none`,
+WARN/DENY mapping, webhook envelope checks, REST surface, and the
+Laravel middleware.
