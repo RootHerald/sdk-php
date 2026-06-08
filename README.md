@@ -1,14 +1,13 @@
 # rootherald/rootherald (PHP)
 
-Root Herald server SDK for PHP 8.1+. Verifies attestation token JWTs and
-CAEP webhook events (SET JWTs) against the Root Herald JWKS. Pure PHP —
-only requires `ext-openssl` and `firebase/php-jwt`.
+Root Herald server SDK for PHP 8.1+ — verifies attestation token JWTs and
+CAEP webhook events against the Root Herald JWKS.
 
 ```bash
 composer require rootherald/rootherald
 ```
 
-## Usage
+## Verify a token
 
 ```php
 use Rootherald\Client;
@@ -25,72 +24,29 @@ if ($claims->verdict === Verdict::ALLOW) {
 }
 ```
 
-`$claims` exposes:
+`$claims` exposes the subject, OIDC claims (`acr`/`amr`/`authTime`), device
+fields (`deviceId`/`tpmClass`/`platform`/`attestationType`), the `verdict`
+(`Verdict::ALLOW`/`WARN`/`DENY`), and the full verified payload as
+`$claims->raw`.
 
-- `$claims->subject` — stable user UUID
-- `$claims->acr`, `$claims->amr`, `$claims->authTime` — OIDC claims
-- `$claims->deviceId` (`rootherald_device.ueid`)
-- `$claims->tpmClass`, `$claims->platform`, `$claims->attestationType`
-- `$claims->earStatus` and `$claims->verdict` (`Verdict::ALLOW`/`WARN`/`DENY`)
-- `$claims->raw` — full verified payload
-
-## Webhook verification
+## Laravel
 
 ```php
-$event = $client->verifySet($request->getContent());
-
-if ($event->eventType === 'https://schemas.openid.net/secevent/caep/event-type/device-compliance-change') {
-    updateDevice($event->deviceId, $event->eventPayload);
-}
-return new Response('', 202);
-```
-
-## Laravel integration
-
-```php
-// config/app.php (or via auto-discovery)
-'providers' => [
-    Rootherald\Laravel\RootheraldServiceProvider::class,
-],
-
-// routes/api.php
 Route::post('/signup', SignupController::class)
     ->middleware(['rootherald.guard:signup']);
 
-// Inside the controller:
+// In the controller:
 $claims = request()->attributes->get('rootherald_claims');
 ```
 
-## Symfony integration
+The service provider auto-discovers; configure via `config/rootherald.php` or
+the `ROOTHERALD_*` environment variables.
 
-Register `\Rootherald\Symfony\EventSubscriber\RootheraldSubscriber` in your
-services configuration; opt routes in by setting the `_rootherald_action`
-attribute (via a controller attribute or route default).
+## Samples
 
-## WordPress
+- [`samples/laravel-demo`](samples/laravel-demo) — Laravel signup guard
+- [`samples/wordpress-plugin`](samples/wordpress-plugin) — single-file plugin
+  that blocks registration without a valid attestation token
 
-See [`samples/wordpress-plugin`](samples/wordpress-plugin) for a single-file
-plugin that blocks user registration without a valid attestation token.
-
-## Errors
-
-All exceptions extend `\Rootherald\Exceptions\RootheraldException`:
-
-- `TokenExpiredException` — `exp` is in the past
-- `VerificationException` — signature / issuer / audience / schema fail
-- `WebhookSignatureException` — SET JWT verification failed
-- `JwksException` — JWKS could not be fetched / parsed
-- `HttpException` — Root Herald REST API returned non-2xx
-
-## Tests
-
-```bash
-composer install
-vendor/bin/phpunit
-```
-
-Tests cover the same edge-case matrix as the other Root Herald SDKs:
-happy path, expired token, wrong issuer/audience, missing required
-claim, bad EAT profile, unknown kid, tampered signature, `alg: none`,
-WARN/DENY mapping, webhook envelope checks, REST surface, and the
-Laravel middleware.
+Symfony, webhook (SET) verification, and the REST surface are documented at
+<https://rootherald.io/developers/sdks/php>.
