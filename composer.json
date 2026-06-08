@@ -7,8 +7,8 @@
     "homepage": "https://rootherald.io",
     "support": {
         "docs": "https://rootherald.io/developers/sdks/php",
-        "source": "https://github.com/rootherald/rootherald",
-        "issues": "https://github.com/rootherald/rootherald/issues"
+        "source": "https://github.com/RootHerald/sdk-php",
+        "issues": "https://github.com/RootHerald/sdk-php/issues"
     },
     "authors": [
         {
