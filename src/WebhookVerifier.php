@@ -59,11 +59,9 @@ final class WebhookVerifier
         $previousLeeway = JWT::$leeway;
         JWT::$leeway = $this->leewaySeconds;
         try {
-            try {
-                $decoded = JWT::decode($body, $key);
-            } catch (\Throwable $e) {
-                throw new WebhookSignatureException('SET signature verification failed: ' . $e->getMessage(), 0, $e);
-            }
+            $decoded = JWT::decode($body, $key);
+        } catch (\Throwable $e) {
+            throw new WebhookSignatureException('SET signature verification failed: ' . $e->getMessage(), 0, $e);
         } finally {
             JWT::$leeway = $previousLeeway;
         }
