@@ -70,6 +70,43 @@ final class BackgroundCheckTest extends TestCase
         $this->assertSame('...', $seen['body']['evidence']['quote']);
     }
 
+    public function testCohortFieldsAreExposed(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
+            'verdict' => [
+                'verdict' => 'pass',
+                'ueid' => 'dev-9',
+                'device' => [
+                    'cohortKey' => 'tpm20:win11:sb1:abc123',
+                    'cohortScope' => 'tenant-fleet',
+                    'cohortPrevalence' => 0.042,
+                    'cohortPrevalencePerPcr' => ['0' => 0.9, '7' => 0.5],
+                    'cohortSampleSize' => 1287,
+                    'novelProfile' => false,
+                ],
+            ],
+        ])]);
+        $result = $bg->attest([], challengeId: 'ch_1');
+        $this->assertSame('tpm20:win11:sb1:abc123', $result->cohortKey());
+        $this->assertSame('tenant-fleet', $result->cohortScope());
+        $this->assertSame(0.042, $result->cohortPrevalence());
+        $this->assertSame(0.5, $result->cohortPrevalencePerPcr()['7']);
+        $this->assertSame(1287, $result->cohortSampleSize());
+        $this->assertFalse($result->novelProfile());
+    }
+
+    public function testCohortFieldsAbsentWhenServerOmitsThem(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
+            'verdict' => ['verdict' => 'pass', 'ueid' => 'dev-9'],
+        ])]);
+        $result = $bg->attest([], challengeId: 'ch_1');
+        $this->assertNull($result->cohortKey());
+        $this->assertNull($result->cohortPrevalence());
+        $this->assertNull($result->novelProfile());
+        $this->assertSame([], $result->cohortPrevalencePerPcr());
+    }
+
     public function testFailVerdictIsNotAnError(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
