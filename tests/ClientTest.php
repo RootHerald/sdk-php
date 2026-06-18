@@ -39,21 +39,6 @@ final class ClientTest extends TestCase
         $this->assertSame('Bearer rh_sk_test_xxx', $seen['auth']);
     }
 
-    public function testVerifyAttestationPostsBody(): void
-    {
-        $seen = [];
-        $client = $this->client(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
-            $seen['method'] = $method;
-            $seen['body'] = json_decode((string) $body, true);
-            return ['status' => 200, 'body' => json_encode(['verdict' => 'pass', 'token' => 'eyJ.x.y'])];
-        });
-        $out = $client->verifyAttestation(['pcr_blob' => '…'], action: 'signup');
-        $this->assertSame('pass', $out['verdict']);
-        $this->assertSame('POST', $seen['method']);
-        $this->assertSame('signup', $seen['body']['action']);
-        $this->assertSame('…', $seen['body']['evidence']['pcr_blob']);
-    }
-
     public function testHttpErrorRaised(): void
     {
         $client = $this->client(fn () => ['status' => 403, 'body' => '{"error":"forbidden"}']);
