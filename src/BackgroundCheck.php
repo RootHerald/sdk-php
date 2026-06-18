@@ -29,7 +29,7 @@ use Rootherald\Exceptions\UnknownPolicyException;
  */
 final class BackgroundCheck
 {
-    public const DEFAULT_BASE_URL = 'https://api.rootherald.com';
+    public const DEFAULT_BASE_URL = 'https://api.rootherald.io';
 
     private const SECRET_KEY_PREFIX = 'rh_sk_';
 
