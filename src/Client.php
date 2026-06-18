@@ -103,21 +103,6 @@ final class Client
     }
 
     /**
-     * POST /api/v1/attestations/verify
-     *
-     * @param array<string, mixed> $evidence
-     * @return array<string, mixed>
-     */
-    public function verifyAttestation(array $evidence, ?string $action = null): array
-    {
-        $body = ['evidence' => $evidence];
-        if ($action !== null) {
-            $body['action'] = $action;
-        }
-        return $this->request('POST', '/api/v1/attestations/verify', $body);
-    }
-
-    /**
      * @param array<string, mixed>|null $body
      * @return array<string, mixed>
      */

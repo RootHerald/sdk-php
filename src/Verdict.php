@@ -27,4 +27,18 @@ enum Verdict: string
             default => self::WARN,
         };
     }
+
+    /**
+     * Map the flat "verdict" field the verify endpoint emits
+     * ("pass"/"fail"/"warn") to the SDK enum. Unknown/missing values map to
+     * WARN (fail-closed: never silently ALLOW).
+     */
+    public static function fromRaw(?string $raw): self
+    {
+        return match (strtolower(trim((string) $raw))) {
+            'pass', 'allow', 'affirming' => self::ALLOW,
+            'fail', 'deny', 'contraindicated' => self::DENY,
+            default => self::WARN,
+        };
+    }
 }
