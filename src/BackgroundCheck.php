@@ -12,17 +12,24 @@ use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\UnknownPolicyException;
 
 /**
- * Server -> server Background-Check client.
+ * Server -> server backend-relay client (Client ABI 2.0).
  *
- * The customer's dumb client collects an opaque evidence blob (no keys, no
- * Root Herald contact) and hands it to the customer's own server. The server
- * uses this client, authenticated with its `rh_sk_` secret key, to:
- *   1. mint a relay-friendly nonce  ({@see createChallenge})
- *   2. submit the evidence for appraisal and get a verdict  ({@see attest})
+ * The customer's keyless dumb client does only local TPM work and hands opaque
+ * blobs to the customer's own backend — it holds no Root Herald key and opens no
+ * socket to Root Herald. This client is the only thing that talks to Root Herald,
+ * authenticated with the customer's `rh_sk_` secret key. It mirrors the four
+ * server-SDK helpers of `@rootherald/node`:
  *
- * This is ADDITIVE. The offline/badge-tier path ({@see Client::verifyToken} /
- * {@see AttestationTokenVerifier}) is unchanged; the optional `token` returned
- * by {@see attest} with `returnToken: true` is itself verifiable with it.
+ *   1. {@see relayEnroll}    — relay the client's enroll blob; `POST /api/v1/devices/enroll`
+ *   2. {@see relayActivate}  — relay the client's activation blob; `POST /api/v1/devices/activate`
+ *   3. {@see issueChallenge} — mint a relay-friendly nonce; `POST /api/v1/attestations/challenge`
+ *   4. {@see verify}         — submit the evidence, get the verdict; `POST /api/v1/attestations/verify`
+ *
+ * The verdict is computed by Root Herald and returned HERE, to the customer's
+ * backend — it never travels through the client, which holds no key and gets no
+ * verdict. This is ADDITIVE: the offline/badge-tier path ({@see Client::verifyToken}
+ * / {@see AttestationTokenVerifier}) is unchanged, and the optional `token`
+ * returned by {@see verify} with `returnToken: true` is itself verifiable with it.
  *
  * The REST call uses PHP's curl extension directly (no Guzzle dependency).
  * Inject a custom HTTP transport for testing.
@@ -67,11 +74,11 @@ final class BackgroundCheck
     /**
      * POST /api/v1/attestations/challenge — mint a relay-friendly nonce. Relay
      * the nonce to the client; the client quotes over it, then submit the
-     * resulting evidence with {@see attest} using the returned challengeId.
+     * resulting evidence with {@see verify} using the returned challengeId.
      *
      * @param string|null $deviceHint optional advisory hint identifying the device
      */
-    public function createChallenge(?string $deviceHint = null): Challenge
+    public function issueChallenge(?string $deviceHint = null): Challenge
     {
         $body = [];
         if ($deviceHint !== null) {
@@ -98,18 +105,18 @@ final class BackgroundCheck
      * problems raise an exception.
      *
      * @param array<string, mixed> $evidence    opaque blob from the client collector; passed through verbatim
-     * @param string               $challengeId the single-use id from createChallenge
+     * @param string               $challengeId the single-use id from issueChallenge
      * @param string|null          $policy      tenant policy id/name or a "rootherald:builtin:*" name; unknown names fail closed (422)
      * @param bool                 $returnToken opt-in signed EAT (JWT) output
      */
-    public function attest(
+    public function verify(
         array $evidence,
         string $challengeId,
         ?string $policy = null,
         bool $returnToken = false,
     ): AttestResult {
         if ($challengeId === '') {
-            throw new ChallengeException(409, '', 'attest() requires a challengeId (from createChallenge)');
+            throw new ChallengeException(409, '', 'verify() requires a challengeId (from issueChallenge)');
         }
         $body = [
             'challengeId' => $challengeId,
@@ -134,10 +141,159 @@ final class BackgroundCheck
     }
 
     /**
+     * Enroll relay — leg 1. POST /api/v1/devices/enroll.
+     *
+     * Relays the client's `EnrollBegin()` blob to Root Herald with the `rh_sk_`
+     * secret and resolves the enroll endpoint's asymmetric response:
+     *
+     *   - **201** — a fresh enroll: returns a {@see RelayEnrollResult} with
+     *     `alreadyEnrolled === false` and a {@see EnrollChallenge}. Hand the
+     *     challenge to the client's `EnrollComplete`, then relay the result to
+     *     {@see relayActivate}.
+     *   - **409** — the device is already bound: returns a {@see RelayEnrollResult}
+     *     with `alreadyEnrolled === true` (no challenge). SKIP the activate leg;
+     *     just use `deviceId`.
+     *
+     * The client never holds the `rh_sk_` key and never talks to Root Herald;
+     * this backend helper is the only thing that does.
+     *
+     * @param array<string, mixed> $enrollRequestBlob opaque `EnrollBegin()` blob from the client
+     *        (wire shape: ekPublicKey, akPublicArea, platform, ekCertPem?, ekCertificateChain?)
+     *
+     * @throws \InvalidArgumentException if the blob lacks ekPublicKey/akPublicArea
+     */
+    public function relayEnroll(array $enrollRequestBlob): RelayEnrollResult
+    {
+        if (
+            !is_string($enrollRequestBlob['ekPublicKey'] ?? null)
+            || !is_string($enrollRequestBlob['akPublicArea'] ?? null)
+        ) {
+            throw new \InvalidArgumentException(
+                'relayEnroll() requires an enroll request blob with ekPublicKey and akPublicArea'
+            );
+        }
+
+        [$status, $respBody] = $this->rawPost('/api/v1/devices/enroll', $enrollRequestBlob);
+
+        // 409 = already enrolled: the body carries only deviceId. Resolve it and
+        // signal "skip activate" instead of treating it as an error.
+        if ($status === 409) {
+            $body = $this->decodeObject($status, $respBody);
+            $deviceId = is_string($body['deviceId'] ?? null) ? $body['deviceId'] : '';
+            if ($deviceId === '') {
+                throw new HttpException(409, $respBody, 'already-enrolled (409) response missing deviceId');
+            }
+            return RelayEnrollResult::alreadyEnrolled($deviceId);
+        }
+
+        if ($status >= 400) {
+            throw $this->mapError($status, $respBody);
+        }
+
+        $data = $this->decodeObject($status, $respBody);
+        if (
+            !is_string($data['deviceId'] ?? null)
+            || !is_string($data['credentialBlob'] ?? null)
+            || !is_string($data['encryptedSecret'] ?? null)
+        ) {
+            throw new HttpException(
+                $status,
+                $respBody,
+                'enroll response missing deviceId/credentialBlob/encryptedSecret'
+            );
+        }
+
+        return RelayEnrollResult::fresh(new EnrollChallenge(
+            (string) $data['deviceId'],
+            (string) $data['credentialBlob'],
+            (string) $data['encryptedSecret'],
+        ));
+    }
+
+    /**
+     * Enroll relay — leg 2. POST /api/v1/devices/activate.
+     *
+     * Relays the client's `EnrollComplete()` blob (the decrypted credential
+     * secret) to Root Herald, completing the EK->AK credential-activation
+     * handshake. Call this only when {@see relayEnroll} returned
+     * `alreadyEnrolled === false`.
+     *
+     * @param array<string, mixed> $activationResponse opaque `EnrollComplete()` blob from the client
+     *        (wire shape: deviceId, decryptedSecret, akPublicKey?)
+     *
+     * @throws \InvalidArgumentException if the blob lacks deviceId/decryptedSecret
+     */
+    public function relayActivate(array $activationResponse): RelayActivateResult
+    {
+        $deviceId = is_string($activationResponse['deviceId'] ?? null) ? $activationResponse['deviceId'] : '';
+        if ($deviceId === '' || !is_string($activationResponse['decryptedSecret'] ?? null)) {
+            throw new \InvalidArgumentException(
+                'relayActivate() requires an activation response with deviceId and decryptedSecret'
+            );
+        }
+
+        $data = $this->post('/api/v1/devices/activate', $activationResponse);
+        $resolvedId = is_string($data['deviceId'] ?? null) ? $data['deviceId'] : '';
+        if ($resolvedId === '') {
+            throw new HttpException(200, json_encode($data) ?: '', 'activate response missing deviceId');
+        }
+
+        return new RelayActivateResult(
+            $resolvedId,
+            is_string($data['status'] ?? null) ? $data['status'] : null,
+            is_string($data['enrolledAt'] ?? null) ? $data['enrolledAt'] : null,
+        );
+    }
+
+    /**
+     * @deprecated Renamed to {@see issueChallenge} for the Client ABI 2.0 backend
+     * contract. Retained as a thin alias for backwards compatibility.
+     */
+    public function createChallenge(?string $deviceHint = null): Challenge
+    {
+        return $this->issueChallenge($deviceHint);
+    }
+
+    /**
+     * @deprecated Renamed to {@see verify} for the Client ABI 2.0 backend
+     * contract. Retained as a thin alias for backwards compatibility.
+     *
+     * @param array<string, mixed> $evidence
+     */
+    public function attest(
+        array $evidence,
+        string $challengeId,
+        ?string $policy = null,
+        bool $returnToken = false,
+    ): AttestResult {
+        return $this->verify($evidence, $challengeId, $policy, $returnToken);
+    }
+
+    /**
      * @param array<string, mixed> $body
      * @return array<string, mixed>
      */
     private function post(string $path, array $body): array
+    {
+        [$status, $respBody] = $this->rawPost($path, $body);
+        if ($status >= 400) {
+            throw $this->mapError($status, $respBody);
+        }
+        if ($respBody === '' || $status === 204) {
+            return [];
+        }
+        return $this->decodeObject($status, $respBody);
+    }
+
+    /**
+     * Issue an authenticated JSON POST and return the raw status + body, leaving
+     * status interpretation to the caller (used by {@see relayEnroll}, which must
+     * branch on the enroll 409 instead of treating it as an error).
+     *
+     * @param array<string, mixed> $body
+     * @return array{0: int, 1: string} [status, body]
+     */
+    private function rawPost(string $path, array $body): array
     {
         $url = $this->baseUrl . $path;
         $headers = [
@@ -148,15 +304,18 @@ final class BackgroundCheck
         $rawBody = json_encode($body, JSON_THROW_ON_ERROR);
 
         $resp = ($this->httpTransport)('POST', $url, $headers, $rawBody);
-        $status = $resp['status'];
-        $respBody = $resp['body'];
 
-        if ($status >= 400) {
-            throw $this->mapError($status, $respBody);
-        }
-        if ($respBody === '' || $status === 204) {
-            return [];
-        }
+        return [(int) $resp['status'], (string) $resp['body']];
+    }
+
+    /**
+     * Decode a JSON response body into an associative array, mapping a parse
+     * failure to a typed {@see HttpException}.
+     *
+     * @return array<string, mixed>
+     */
+    private function decodeObject(int $status, string $respBody): array
+    {
         try {
             $decoded = json_decode($respBody, associative: true, flags: JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {

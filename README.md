@@ -2,10 +2,12 @@
 
 Root Herald server SDK for PHP 8.1+. Two paths:
 
-- **Background-Check (server → server)** — `BackgroundCheck`: your dumb client
-  collects an opaque evidence blob and hands it to *your* server, which appraises
-  it with Root Herald using your `rh_sk_` secret key. The client never holds a
-  key or talks to Root Herald.
+- **Backend relay (server → server, Client ABI 2.0)** — `BackgroundCheck`: your
+  keyless dumb client does only local TPM work and hands opaque blobs to *your*
+  server, which relays them to Root Herald using your `rh_sk_` secret key. The
+  client never holds a key or talks to Root Herald, and never gets a verdict.
+  Four helpers mirror `@rootherald/node`: `relayEnroll`, `relayActivate`,
+  `issueChallenge`, `verify`.
 - **Badge tier (offline verify)** — `Client::verifyToken` + Laravel/Symfony
   middleware: verify a Root Herald-issued EAT (JWT) and CAEP webhook events
   against the Root Herald JWKS, no per-request network call.
@@ -14,7 +16,7 @@ Root Herald server SDK for PHP 8.1+. Two paths:
 composer require rootherald/rootherald
 ```
 
-## Background-Check (server → server)
+## Backend relay (server → server)
 
 ```php
 use Rootherald\BackgroundCheck;
@@ -25,11 +27,11 @@ use Rootherald\Verdict;
 $rh = new BackgroundCheck(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
 
 // 1) Mint a relay-friendly nonce; send $challenge->nonce down to the client.
-$challenge = $rh->createChallenge();
+$challenge = $rh->issueChallenge();
 
 // 2) The client quotes over the nonce and returns an opaque $evidence array;
-//    submit it for appraisal.
-$result = $rh->attest(
+//    relay it for appraisal.
+$result = $rh->verify(
     evidence: $evidence,
     challengeId: $challenge->challengeId,
     policy: 'rootherald:builtin:strict-hardware', // optional
@@ -41,10 +43,35 @@ if ($result->verdict === Verdict::ALLOW) {
 }
 ```
 
+> `createChallenge()` / `attest()` are retained as deprecated aliases of
+> `issueChallenge()` / `verify()`.
+
 An un-enrolled / failing device is a verdict (`Verdict::DENY`/`WARN`), **not**
 an exception. Only protocol/auth/quota problems throw — `InvalidSecretKeyException`
 (401), `UnknownPolicyException` (422), `ChallengeException` (409),
 `InvalidEvidenceException` (400), `QuotaExceededException` (429).
+
+### Enroll relay (one-time device bootstrap)
+
+The client's keyless enroll handshake is relayed in two legs. The enroll leg is
+asymmetric — a fresh device returns a MakeCredential challenge (`201`); an
+already-bound device short-circuits (`409`) and you skip activation.
+
+```php
+// Leg 1 — relay the client's EnrollBegin() blob.
+$enroll = $rh->relayEnroll($enrollRequestBlob); // ekPublicKey, akPublicArea, platform, …
+
+if ($enroll->alreadyEnrolled) {
+    // 409: device already bound — use $enroll->deviceId, skip activation.
+} else {
+    // 201: hand $enroll->challenge to the client's EnrollComplete(), then…
+    $client->sendToClient($enroll->challenge->toArray());
+
+    // Leg 2 — relay the client's EnrollComplete() blob.
+    $activated = $rh->relayActivate($activationResponse); // deviceId, decryptedSecret
+    // $activated->deviceId is what you map to your user/account.
+}
+```
 
 ## Verify a token (badge tier)
 
