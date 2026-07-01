@@ -24,10 +24,10 @@ Route::post('/attest', function () {
 
     // 1) mint a nonce (in production, hand $challenge->nonce to the client
     //    first, then receive the evidence it produced; compressed here).
-    $challenge = $rh->createChallenge();
+    $challenge = $rh->issueChallenge();
 
     // 2) appraise the opaque evidence the client posted.
-    $result = $rh->attest(
+    $result = $rh->verify(
         evidence: (array) request()->input('evidence', []),
         challengeId: $challenge->challengeId,
     );
