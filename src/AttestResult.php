@@ -5,9 +5,8 @@ declare(strict_types=1);
 namespace Rootherald;
 
 /**
- * The result of {@see BackgroundCheck::attest}: the device verdict plus, when
- * requested, the signed EAT (JWT). The token is itself verifiable offline with
- * {@see AttestationTokenVerifier}.
+ * The result of {@see BackgroundCheck::verify}: the device verdict and the full
+ * decoded verdict object.
  */
 final class AttestResult
 {
@@ -17,7 +16,6 @@ final class AttestResult
     public function __construct(
         public readonly Verdict $verdict,
         public readonly array $verdictData,
-        public readonly ?string $token = null,
     ) {
     }
 
