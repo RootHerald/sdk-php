@@ -1,16 +1,13 @@
 # rootherald/rootherald (PHP)
 
-Root Herald server SDK for PHP 8.1+. Two paths:
+Root Herald server SDK for PHP 8.1+.
 
-- **Backend relay (server → server, Client ABI 2.0)** — `BackgroundCheck`: your
-  keyless dumb client does only local TPM work and hands opaque blobs to *your*
-  server, which relays them to Root Herald using your `rh_sk_` secret key. The
-  client never holds a key or talks to Root Herald, and never gets a verdict.
-  Four helpers mirror `@rootherald/node`: `relayEnroll`, `relayActivate`,
-  `issueChallenge`, `verify`.
-- **Badge tier (offline verify)** — `Client::verifyToken` + Laravel/Symfony
-  middleware: verify a Root Herald-issued EAT (JWT) and CAEP webhook events
-  against the Root Herald JWKS, no per-request network call.
+**Backend relay (server → server, Client ABI 2.0)** via `BackgroundCheck`: your
+keyless dumb client does only local TPM work and hands opaque blobs to *your*
+server, which relays them to Root Herald using your `rh_sk_` secret key. The
+client never holds a key or talks to Root Herald, and never gets a verdict.
+Four helpers mirror `@rootherald/node`: `relayEnroll`, `relayActivate`,
+`issueChallenge`, `verify`.
 
 ```bash
 composer require rootherald/rootherald
@@ -22,8 +19,8 @@ composer require rootherald/rootherald
 use Rootherald\BackgroundCheck;
 use Rootherald\Verdict;
 
-// Construct with your SECRET key (rh_sk_…). A publishable key (rh_pk_…) is
-// rejected — it must never be used server-side.
+// Construct with your SECRET key (rh_sk_…). Any key without the rh_sk_ prefix
+// is rejected.
 $rh = new BackgroundCheck(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
 
 // 1) Mint a relay-friendly nonce; send $challenge->nonce down to the client.
@@ -35,11 +32,10 @@ $result = $rh->verify(
     evidence: $evidence,
     challengeId: $challenge->challengeId,
     policy: 'rootherald:builtin:strict-hardware', // optional
-    returnToken: true,                            // optional signed EAT
 );
 
 if ($result->verdict === Verdict::ALLOW) {
-    // proceed; $result->token (when returnToken) is verifiable offline.
+    // proceed
 }
 ```
 
@@ -47,14 +43,14 @@ if ($result->verdict === Verdict::ALLOW) {
 > `issueChallenge()` / `verify()`.
 
 An un-enrolled / failing device is a verdict (`Verdict::DENY`/`WARN`), **not**
-an exception. Only protocol/auth/quota problems throw — `InvalidSecretKeyException`
+an exception. Only protocol/auth/quota problems throw: `InvalidSecretKeyException`
 (401), `UnknownPolicyException` (422), `ChallengeException` (409),
 `InvalidEvidenceException` (400), `QuotaExceededException` (429).
 
 ### Enroll relay (one-time device bootstrap)
 
 The client's keyless enroll handshake is relayed in two legs. The enroll leg is
-asymmetric — a fresh device returns a MakeCredential challenge (`201`); an
+asymmetric: a fresh device returns a MakeCredential challenge (`201`); an
 already-bound device short-circuits (`409`) and you skip activation.
 
 ```php
@@ -73,46 +69,9 @@ if ($enroll->alreadyEnrolled) {
 }
 ```
 
-## Verify a token (badge tier)
-
-```php
-use Rootherald\Client;
-use Rootherald\Verdict;
-
-$client = new Client(
-    issuer: 'https://rootherald.io/myorg',
-    jwksUri: 'https://rootherald.io/.well-known/jwks.json',
-);
-$claims = $client->verifyToken($token);
-
-if ($claims->verdict === Verdict::ALLOW) {
-    // proceed with signup
-}
-```
-
-`$claims` exposes the subject, OIDC claims (`acr`/`amr`/`authTime`), device
-fields (`deviceId`/`tpmClass`/`platform`/`attestationType`), the `verdict`
-(`Verdict::ALLOW`/`WARN`/`DENY`), and the full verified payload as
-`$claims->raw`.
-
-## Laravel
-
-```php
-Route::post('/signup', SignupController::class)
-    ->middleware(['rootherald.guard:signup']);
-
-// In the controller:
-$claims = request()->attributes->get('rootherald_claims');
-```
-
-The service provider auto-discovers; configure via `config/rootherald.php` or
-the `ROOTHERALD_*` environment variables.
+The verdict is computed by Root Herald and returned to your backend; it never
+travels through the client.
 
 ## Samples
 
-- [`samples/laravel-demo`](samples/laravel-demo) — Laravel signup guard
-- [`samples/wordpress-plugin`](samples/wordpress-plugin) — single-file plugin
-  that blocks registration without a valid attestation token
-
-Symfony, webhook (SET) verification, and the REST surface are documented at
-<https://rootherald.io/developers/sdks/php>.
+- [`samples/laravel-demo`](samples/laravel-demo): Laravel `POST /attest` Background-Check route

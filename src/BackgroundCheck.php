@@ -27,9 +27,7 @@ use Rootherald\Exceptions\UnknownPolicyException;
  *
  * The verdict is computed by Root Herald and returned HERE, to the customer's
  * backend — it never travels through the client, which holds no key and gets no
- * verdict. This is ADDITIVE: the offline/badge-tier path ({@see Client::verifyToken}
- * / {@see AttestationTokenVerifier}) is unchanged, and the optional `token`
- * returned by {@see verify} with `returnToken: true` is itself verifiable with it.
+ * verdict.
  *
  * The REST call uses PHP's curl extension directly (no Guzzle dependency).
  * Inject a custom HTTP transport for testing.
@@ -64,7 +62,7 @@ final class BackgroundCheck
         }
         if (!str_starts_with($secretKey, self::SECRET_KEY_PREFIX)) {
             throw new \InvalidArgumentException(
-                'secretKey must be a secret key (rh_sk_…); a publishable key (rh_pk_…) must never be used server-side'
+                'RootHerald secret key must start with rh_sk_'
             );
         }
         $this->baseUrl = rtrim($baseUrl ?? self::DEFAULT_BASE_URL, '/');
@@ -97,8 +95,7 @@ final class BackgroundCheck
 
     /**
      * POST /api/v1/attestations/verify — submit the opaque evidence blob for
-     * server-side appraisal and return the verdict (plus an optional signed EAT
-     * when $returnToken is true).
+     * server-side appraisal and return the verdict.
      *
      * An un-enrolled / failing device is NOT an error — it returns a normal
      * AttestResult carrying Verdict::DENY/WARN. Only protocol/auth/quota
@@ -107,13 +104,11 @@ final class BackgroundCheck
      * @param array<string, mixed> $evidence    opaque blob from the client collector; passed through verbatim
      * @param string               $challengeId the single-use id from issueChallenge
      * @param string|null          $policy      tenant policy id/name or a "rootherald:builtin:*" name; unknown names fail closed (422)
-     * @param bool                 $returnToken opt-in signed EAT (JWT) output
      */
     public function verify(
         array $evidence,
         string $challengeId,
         ?string $policy = null,
-        bool $returnToken = false,
     ): AttestResult {
         if ($challengeId === '') {
             throw new ChallengeException(409, '', 'verify() requires a challengeId (from issueChallenge)');
@@ -125,9 +120,6 @@ final class BackgroundCheck
         if ($policy !== null) {
             $body['policy'] = $policy;
         }
-        if ($returnToken) {
-            $body['returnToken'] = true;
-        }
 
         $data = $this->post('/api/v1/attestations/verify', $body);
         if (!isset($data['verdict']) || !is_array($data['verdict'])) {
@@ -135,9 +127,8 @@ final class BackgroundCheck
         }
         $verdictData = $data['verdict'];
         $raw = is_string($verdictData['verdict'] ?? null) ? $verdictData['verdict'] : null;
-        $token = isset($data['token']) && is_string($data['token']) ? $data['token'] : null;
 
-        return new AttestResult(Verdict::fromRaw($raw), $verdictData, $token);
+        return new AttestResult(Verdict::fromRaw($raw), $verdictData);
     }
 
     /**
@@ -264,9 +255,8 @@ final class BackgroundCheck
         array $evidence,
         string $challengeId,
         ?string $policy = null,
-        bool $returnToken = false,
     ): AttestResult {
-        return $this->verify($evidence, $challengeId, $policy, $returnToken);
+        return $this->verify($evidence, $challengeId, $policy);
     }
 
     /**

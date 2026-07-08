@@ -5,9 +5,8 @@
  */
 
 return [
-    'issuer' => env('ROOTHERALD_ISSUER'),
-    'api_key' => env('ROOTHERALD_API_KEY'),
-    'base_url' => env('ROOTHERALD_BASE_URL', 'https://rootherald.io'),
-    'jwks_uri' => env('ROOTHERALD_JWKS_URI', 'https://rootherald.io/.well-known/jwks.json'),
-    'audience' => env('ROOTHERALD_AUDIENCE'),
+    // Background-Check (server -> server) secret key (rh_sk_…). Stays on YOUR
+    // server only; never shipped to the client.
+    'secret_key' => env('ROOTHERALD_SECRET_KEY'),
+    'base_url' => env('ROOTHERALD_BASE_URL', 'https://api.rootherald.io'),
 ];
