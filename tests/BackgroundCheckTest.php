@@ -24,10 +24,10 @@ final class BackgroundCheckTest extends TestCase
         );
     }
 
-    public function testRejectsPublishableKey(): void
+    public function testRejectsInvalidPrefixKey(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        new BackgroundCheck(secretKey: 'rh_pk_live_abc');
+        new BackgroundCheck(secretKey: 'rh_bogus_abc');
     }
 
     public function testRejectsEmptyKey(): void
@@ -60,12 +60,10 @@ final class BackgroundCheckTest extends TestCase
             $seen['body'] = json_decode((string) $body, true);
             return ['status' => 200, 'body' => json_encode([
                 'verdict' => ['verdict' => 'pass', 'ueid' => 'dev-9'],
-                'token' => 'eyJ.signed.eat',
             ])];
         });
-        $result = $bg->attest(['quote' => '...'], challengeId: 'ch_1', returnToken: true);
+        $result = $bg->attest(['quote' => '...'], challengeId: 'ch_1');
         $this->assertSame(Verdict::ALLOW, $result->verdict);
-        $this->assertSame('eyJ.signed.eat', $result->token);
         $this->assertSame('ch_1', $seen['body']['challengeId']);
         $this->assertSame('...', $seen['body']['evidence']['quote']);
     }
@@ -114,7 +112,6 @@ final class BackgroundCheckTest extends TestCase
         ])]);
         $result = $bg->attest([], challengeId: 'ch_1');
         $this->assertSame(Verdict::DENY, $result->verdict);
-        $this->assertNull($result->token);
     }
 
     /** @return array<string, array{int, class-string<\Throwable>}> */
