@@ -11,11 +11,17 @@ namespace Rootherald;
 final class AttestResult
 {
     /**
-     * @param array<string, mixed> $verdictData the full decoded verdict object
+     * @param array<string, mixed> $verdictData        the full decoded verdict object
+     * @param list<string>         $assuranceClaimsMet assurance claim URNs the appraisal satisfied
+     *        (top-level `assuranceClaimsMet`), mirroring `@rootherald/node`
+     * @param bool                 $enrollmentRequired the attest-first / enroll-on-miss signal
+     *        (top-level `enrollmentRequired`): the device must (re-)enroll before it can pass
      */
     public function __construct(
         public readonly Verdict $verdict,
         public readonly array $verdictData,
+        public readonly array $assuranceClaimsMet = [],
+        public readonly bool $enrollmentRequired = false,
     ) {
     }
 

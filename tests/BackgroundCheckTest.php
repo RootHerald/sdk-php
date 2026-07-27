@@ -59,22 +59,67 @@ final class BackgroundCheckTest extends TestCase
         $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
             $seen['body'] = json_decode((string) $body, true);
             return ['status' => 200, 'body' => json_encode([
-                'verdict' => ['verdict' => 'pass', 'ueid' => 'dev-9'],
+                'verdict' => [
+                    'acr' => 'urn:rootherald:acr:hardware',
+                    'device' => ['verdict' => 'pass', 'ueid' => 'dev-9', 'earStatus' => 'affirming'],
+                ],
+                'assuranceClaimsMet' => ['urn:rootherald:assurance:hardware-backed'],
+                'enrollmentRequired' => false,
             ])];
         });
         $result = $bg->attest(['quote' => '...'], challengeId: 'ch_1');
         $this->assertSame(Verdict::ALLOW, $result->verdict);
+        $this->assertSame(['urn:rootherald:assurance:hardware-backed'], $result->assuranceClaimsMet);
+        $this->assertFalse($result->enrollmentRequired);
         $this->assertSame('ch_1', $seen['body']['challengeId']);
         $this->assertSame('...', $seen['body']['evidence']['quote']);
+    }
+
+    public function testVerifySendsRequestedDisclosureClass(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode([
+                'verdict' => ['device' => ['verdict' => 'pass']],
+            ])];
+        });
+        $bg->verify([], challengeId: 'ch_1', requestedDisclosureClass: 'pseudonymous');
+        $this->assertSame('pseudonymous', $seen['body']['requestedDisclosureClass']);
+    }
+
+    public function testVerifyOmitsRequestedDisclosureClassWhenUnset(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode([
+                'verdict' => ['device' => ['verdict' => 'pass']],
+            ])];
+        });
+        $bg->verify([], challengeId: 'ch_1');
+        $this->assertArrayNotHasKey('requestedDisclosureClass', $seen['body']);
+    }
+
+    public function testEnrollmentRequiredIsSurfaced(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
+            'verdict' => ['device' => ['verdict' => 'fail']],
+            'assuranceClaimsMet' => [],
+            'enrollmentRequired' => true,
+        ])]);
+        $result = $bg->attest([], challengeId: 'ch_1');
+        $this->assertSame(Verdict::DENY, $result->verdict);
+        $this->assertTrue($result->enrollmentRequired);
     }
 
     public function testCohortFieldsAreExposed(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
             'verdict' => [
-                'verdict' => 'pass',
-                'ueid' => 'dev-9',
                 'device' => [
+                    'verdict' => 'pass',
+                    'ueid' => 'dev-9',
                     'cohortKey' => 'tpm20:win11:sb1:abc123',
                     'cohortScope' => 'tenant-fleet',
                     'cohortPrevalence' => 0.042,
@@ -96,7 +141,7 @@ final class BackgroundCheckTest extends TestCase
     public function testCohortFieldsAbsentWhenServerOmitsThem(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['verdict' => 'pass', 'ueid' => 'dev-9'],
+            'verdict' => ['device' => ['verdict' => 'pass', 'ueid' => 'dev-9']],
         ])]);
         $result = $bg->attest([], challengeId: 'ch_1');
         $this->assertNull($result->cohortKey());
@@ -108,7 +153,7 @@ final class BackgroundCheckTest extends TestCase
     public function testFailVerdictIsNotAnError(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['verdict' => 'fail'],
+            'verdict' => ['device' => ['verdict' => 'fail']],
         ])]);
         $result = $bg->attest([], challengeId: 'ch_1');
         $this->assertSame(Verdict::DENY, $result->verdict);

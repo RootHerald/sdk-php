@@ -181,7 +181,7 @@ final class RelayTest extends TestCase
         $seen = [];
         $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
             $seen['url'] = $url;
-            return ['status' => 200, 'body' => json_encode(['verdict' => ['verdict' => 'pass']])];
+            return ['status' => 200, 'body' => json_encode(['verdict' => ['device' => ['verdict' => 'pass']]])];
         });
         $result = $bg->verify(['quote' => '...'], challengeId: 'ch_1');
         $this->assertSame(Verdict::ALLOW, $result->verdict);
@@ -192,7 +192,7 @@ final class RelayTest extends TestCase
     {
         $bg = $this->bg(fn (string $m, string $url) => str_ends_with($url, '/challenge')
             ? ['status' => 200, 'body' => json_encode(['challengeId' => 'ch', 'nonce' => 'n', 'expiresAt' => 'z'])]
-            : ['status' => 200, 'body' => json_encode(['verdict' => ['verdict' => 'pass']])]);
+            : ['status' => 200, 'body' => json_encode(['verdict' => ['device' => ['verdict' => 'pass']]])]);
 
         $this->assertSame('ch', $bg->createChallenge()->challengeId);
         $this->assertSame(Verdict::ALLOW, $bg->attest([], challengeId: 'ch')->verdict);
