@@ -8,5 +8,5 @@ return [
     // Background-Check (server -> server) secret key (rh_sk_…). Stays on YOUR
     // server only; never shipped to the client.
     'secret_key' => env('ROOTHERALD_SECRET_KEY'),
-    'base_url' => env('ROOTHERALD_BASE_URL', 'https://api.rootherald.io'),
+    'base_url' => env('ROOTHERALD_BASE_URL', 'https://rootherald.io'),
 ];
