@@ -29,9 +29,9 @@ enum Verdict: string
     }
 
     /**
-     * Map the flat "verdict" field the verify endpoint emits
-     * ("pass"/"fail"/"warn") to the SDK enum. Unknown/missing values map to
-     * WARN (fail-closed: never silently ALLOW).
+     * Map the device `verdict` field the verify endpoint emits at
+     * verdict.device.verdict ("pass"/"fail"/"warn") to the SDK enum.
+     * Unknown/missing values map to WARN (fail-closed: never silently ALLOW).
      */
     public static function fromRaw(?string $raw): self
     {

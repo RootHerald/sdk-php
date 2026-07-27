@@ -34,7 +34,7 @@ use Rootherald\Exceptions\UnknownPolicyException;
  */
 final class BackgroundCheck
 {
-    public const DEFAULT_BASE_URL = 'https://api.rootherald.io';
+    public const DEFAULT_BASE_URL = 'https://rootherald.io';
 
     private const SECRET_KEY_PREFIX = 'rh_sk_';
 
@@ -104,11 +104,13 @@ final class BackgroundCheck
      * @param array<string, mixed> $evidence    opaque blob from the client collector; passed through verbatim
      * @param string               $challengeId the single-use id from issueChallenge
      * @param string|null          $policy      tenant policy id/name or a "rootherald:builtin:*" name; unknown names fail closed (422)
+     * @param string|null          $requestedDisclosureClass optional disclosure ceiling ("verdict"|"pseudonymous"|"derived"|"full"); omitted when null
      */
     public function verify(
         array $evidence,
         string $challengeId,
         ?string $policy = null,
+        ?string $requestedDisclosureClass = null,
     ): AttestResult {
         if ($challengeId === '') {
             throw new ChallengeException(409, '', 'verify() requires a challengeId (from issueChallenge)');
@@ -120,15 +122,38 @@ final class BackgroundCheck
         if ($policy !== null) {
             $body['policy'] = $policy;
         }
+        if ($requestedDisclosureClass !== null) {
+            $body['requestedDisclosureClass'] = $requestedDisclosureClass;
+        }
 
         $data = $this->post('/api/v1/attestations/verify', $body);
         if (!isset($data['verdict']) || !is_array($data['verdict'])) {
             throw new HttpException(200, json_encode($data) ?: '', 'verify response missing verdict');
         }
         $verdictData = $data['verdict'];
-        $raw = is_string($verdictData['verdict'] ?? null) ? $verdictData['verdict'] : null;
+        // The pass/fail token lives at verdict.device.verdict on the wire — the
+        // device sub-object also carries earStatus/attestationType/quoteVerified
+        // etc., surfaced via AttestResult::device().
+        $device = is_array($verdictData['device'] ?? null) ? $verdictData['device'] : [];
+        $raw = is_string($device['verdict'] ?? null) ? $device['verdict'] : null;
 
-        return new AttestResult(Verdict::fromRaw($raw), $verdictData);
+        // Top-level siblings of "verdict", mirroring @rootherald/node.
+        $assuranceClaimsMet = [];
+        if (is_array($data['assuranceClaimsMet'] ?? null)) {
+            foreach ($data['assuranceClaimsMet'] as $claim) {
+                if (is_string($claim)) {
+                    $assuranceClaimsMet[] = $claim;
+                }
+            }
+        }
+        $enrollmentRequired = ($data['enrollmentRequired'] ?? null) === true;
+
+        return new AttestResult(
+            Verdict::fromRaw($raw),
+            $verdictData,
+            $assuranceClaimsMet,
+            $enrollmentRequired,
+        );
     }
 
     /**
