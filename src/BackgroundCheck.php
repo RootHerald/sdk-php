@@ -49,7 +49,8 @@ final class BackgroundCheck
      * @param float         $timeoutSeconds
      * @param callable|null $httpTransport callable(method, url, headers, body|null): {status, body}
      *
-     * @throws \InvalidArgumentException if the key is empty or not an rh_sk_ key
+     * @throws \InvalidArgumentException if the key is empty, is not an rh_sk_ key,
+     *         or the base URL is not https (loopback excepted)
      */
     public function __construct(
         private readonly string $secretKey,
@@ -65,8 +66,58 @@ final class BackgroundCheck
                 'RootHerald secret key must start with rh_sk_'
             );
         }
-        $this->baseUrl = rtrim($baseUrl ?? self::DEFAULT_BASE_URL, '/');
+        $this->baseUrl = self::requireSecureBaseUrl($baseUrl ?? self::DEFAULT_BASE_URL);
         $this->httpTransport = $httpTransport ?? $this->defaultTransport();
+    }
+
+    /**
+     * Reject a base URL that would put the rh_sk_ secret on the wire in the clear.
+     *
+     * The secret rides in an Authorization header on every request and is
+     * full-privilege, so an http:// or scheme-less base URL hands it to anyone on
+     * the path. A typo is enough, and nothing downstream notices, because the
+     * request itself still succeeds.
+     *
+     * Loopback is excepted so the local docker stack keeps working over http.
+     *
+     * @throws \InvalidArgumentException when the URL is not absolute https or loopback
+     */
+    private static function requireSecureBaseUrl(string $baseUrl): string
+    {
+        $trimmed = rtrim($baseUrl, '/');
+        $parts = parse_url($trimmed);
+
+        if ($parts === false || !isset($parts['scheme'], $parts['host']) || $parts['host'] === '') {
+            throw new \InvalidArgumentException(
+                sprintf('baseUrl must be an absolute https URL (got %s)', var_export($trimmed, true))
+            );
+        }
+        if ($parts['scheme'] === 'https') {
+            return $trimmed;
+        }
+        if (self::isLoopbackHost($parts['host'])) {
+            return $trimmed;
+        }
+
+        throw new \InvalidArgumentException(
+            sprintf('baseUrl must use https (got %s)', var_export($trimmed, true))
+        );
+    }
+
+    private static function isLoopbackHost(string $host): bool
+    {
+        $stripped = trim($host, '[]');
+        if ($stripped === 'localhost') {
+            return true;
+        }
+        if (filter_var($stripped, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return str_starts_with($stripped, '127.');
+        }
+        if (filter_var($stripped, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            return inet_pton($stripped) === inet_pton('::1');
+        }
+
+        return false;
     }
 
     /**
