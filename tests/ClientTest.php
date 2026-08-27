@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Rootherald\Tests;
 
 use PHPUnit\Framework\TestCase;
-use Rootherald\BackgroundCheck;
+use Rootherald\Client;
 use Rootherald\Exceptions\ChallengeException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
@@ -13,11 +13,11 @@ use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\UnknownPolicyException;
 use Rootherald\Verdict;
 
-final class BackgroundCheckTest extends TestCase
+final class ClientTest extends TestCase
 {
-    private function bg(callable $transport): BackgroundCheck
+    private function bg(callable $transport): Client
     {
-        return new BackgroundCheck(
+        return new Client(
             secretKey: 'rh_sk_test_xxx',
             baseUrl: 'https://api.example.test',
             httpTransport: $transport,
@@ -27,13 +27,13 @@ final class BackgroundCheckTest extends TestCase
     public function testRejectsInvalidPrefixKey(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        new BackgroundCheck(secretKey: 'rh_bogus_abc');
+        new Client(secretKey: 'rh_bogus_abc');
     }
 
     public function testRejectsEmptyKey(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        new BackgroundCheck(secretKey: '');
+        new Client(secretKey: '');
     }
 
     public function testCreateChallenge(): void
@@ -46,7 +46,7 @@ final class BackgroundCheckTest extends TestCase
                 'challengeId' => 'ch_1', 'nonce' => 'n_1', 'expiresAt' => '2030-01-01T00:00:00Z',
             ])];
         });
-        $challenge = $bg->createChallenge('device-hint');
+        $challenge = $bg->issueChallenge('device-hint');
         $this->assertSame('ch_1', $challenge->challengeId);
         $this->assertSame('n_1', $challenge->nonce);
         $this->assertStringEndsWith('/api/v1/attestations/challenge', $seen['url']);
@@ -67,7 +67,7 @@ final class BackgroundCheckTest extends TestCase
                 'enrollmentRequired' => false,
             ])];
         });
-        $result = $bg->attest(['quote' => '...'], challengeId: 'ch_1');
+        $result = $bg->verify(['quote' => '...'], challengeId: 'ch_1');
         $this->assertSame(Verdict::ALLOW, $result->verdict);
         $this->assertSame(['urn:rootherald:assurance:hardware-backed'], $result->assuranceClaimsMet);
         $this->assertFalse($result->enrollmentRequired);
@@ -108,7 +108,7 @@ final class BackgroundCheckTest extends TestCase
             'assuranceClaimsMet' => [],
             'enrollmentRequired' => true,
         ])]);
-        $result = $bg->attest([], challengeId: 'ch_1');
+        $result = $bg->verify([], challengeId: 'ch_1');
         $this->assertSame(Verdict::DENY, $result->verdict);
         $this->assertTrue($result->enrollmentRequired);
     }
@@ -129,7 +129,7 @@ final class BackgroundCheckTest extends TestCase
                 ],
             ],
         ])]);
-        $result = $bg->attest([], challengeId: 'ch_1');
+        $result = $bg->verify([], challengeId: 'ch_1');
         $this->assertSame('tpm20:win11:sb1:abc123', $result->cohortKey());
         $this->assertSame('tenant-fleet', $result->cohortScope());
         $this->assertSame(0.042, $result->cohortPrevalence());
@@ -143,7 +143,7 @@ final class BackgroundCheckTest extends TestCase
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
             'verdict' => ['device' => ['verdict' => 'pass', 'ueid' => 'dev-9']],
         ])]);
-        $result = $bg->attest([], challengeId: 'ch_1');
+        $result = $bg->verify([], challengeId: 'ch_1');
         $this->assertNull($result->cohortKey());
         $this->assertNull($result->cohortPrevalence());
         $this->assertNull($result->novelProfile());
@@ -155,7 +155,7 @@ final class BackgroundCheckTest extends TestCase
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
             'verdict' => ['device' => ['verdict' => 'fail']],
         ])]);
-        $result = $bg->attest([], challengeId: 'ch_1');
+        $result = $bg->verify([], challengeId: 'ch_1');
         $this->assertSame(Verdict::DENY, $result->verdict);
     }
 
@@ -176,6 +176,6 @@ final class BackgroundCheckTest extends TestCase
     {
         $bg = $this->bg(fn () => ['status' => $status, 'body' => '{"error":"x","message":"boom"}']);
         $this->expectException($exception);
-        $bg->attest([], challengeId: 'ch_1');
+        $bg->verify([], challengeId: 'ch_1');
     }
 }

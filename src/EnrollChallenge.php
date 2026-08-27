@@ -12,7 +12,7 @@ namespace Rootherald;
  * Mirrors the contract's `EnrollActivationChallenge`. {@see $credentialBlob} and
  * {@see $encryptedSecret} are the (TPM2B-framed) MakeCredential outputs; the
  * client feeds them straight into TPM2_ActivateCredential, then returns the
- * decrypted secret for {@see BackgroundCheck::relayActivate}.
+ * decrypted secret for {@see Client::relayActivate}.
  */
 final class EnrollChallenge
 {
