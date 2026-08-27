@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Rootherald;
 
 /**
- * The result of {@see BackgroundCheck::verify}: the device verdict and the full
+ * The result of {@see Client::verify}: the device verdict and the full
  * decoded verdict object.
  */
 final class AttestResult

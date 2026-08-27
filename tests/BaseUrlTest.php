@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Rootherald\Tests;
 
 use PHPUnit\Framework\TestCase;
-use Rootherald\BackgroundCheck;
+use Rootherald\Client;
 
 /**
  * The secret rides in an Authorization header on every request and is
@@ -31,7 +31,7 @@ final class BaseUrlTest extends TestCase
     public function testRejectsInsecureBaseUrl(string $baseUrl): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        new BackgroundCheck('rh_sk_test_xxx', $baseUrl);
+        new Client('rh_sk_test_xxx', $baseUrl);
     }
 
     /** @return array<string, array{string}> */
@@ -52,7 +52,7 @@ final class BaseUrlTest extends TestCase
      */
     public function testAcceptsHttpsAndLoopback(string $baseUrl): void
     {
-        $client = new BackgroundCheck('rh_sk_test_xxx', $baseUrl);
-        $this->assertInstanceOf(BackgroundCheck::class, $client);
+        $client = new Client('rh_sk_test_xxx', $baseUrl);
+        $this->assertInstanceOf(Client::class, $client);
     }
 }

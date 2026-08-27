@@ -2,7 +2,7 @@
 
 Root Herald server SDK for PHP 8.1+.
 
-**Backend relay (server → server, Client ABI 2.0)** via `BackgroundCheck`: your
+**Backend relay (server → server, Client ABI 2.0)** via `Client`: your
 keyless dumb client does only local TPM work and hands opaque blobs to *your*
 server, which relays them to Root Herald using your `rh_sk_` secret key. The
 client never holds a key or talks to Root Herald, and never gets a verdict.
@@ -16,12 +16,12 @@ composer require rootherald/rootherald
 ## Backend relay (server → server)
 
 ```php
-use Rootherald\BackgroundCheck;
+use Rootherald\Client;
 use Rootherald\Verdict;
 
 // Construct with your SECRET key (rh_sk_…). Any key without the rh_sk_ prefix
 // is rejected.
-$rh = new BackgroundCheck(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
+$rh = new Client(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
 
 // 1) Mint a relay-friendly nonce; send $challenge->nonce down to the client.
 $challenge = $rh->issueChallenge();

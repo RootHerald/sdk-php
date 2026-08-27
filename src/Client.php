@@ -32,7 +32,7 @@ use Rootherald\Exceptions\UnknownPolicyException;
  * The REST call uses PHP's curl extension directly (no Guzzle dependency).
  * Inject a custom HTTP transport for testing.
  */
-final class BackgroundCheck
+final class Client
 {
     public const DEFAULT_BASE_URL = 'https://rootherald.io';
 
@@ -310,29 +310,6 @@ final class BackgroundCheck
             is_string($data['status'] ?? null) ? $data['status'] : null,
             is_string($data['enrolledAt'] ?? null) ? $data['enrolledAt'] : null,
         );
-    }
-
-    /**
-     * @deprecated Renamed to {@see issueChallenge} for the Client ABI 2.0 backend
-     * contract. Retained as a thin alias for backwards compatibility.
-     */
-    public function createChallenge(?string $deviceHint = null): Challenge
-    {
-        return $this->issueChallenge($deviceHint);
-    }
-
-    /**
-     * @deprecated Renamed to {@see verify} for the Client ABI 2.0 backend
-     * contract. Retained as a thin alias for backwards compatibility.
-     *
-     * @param array<string, mixed> $evidence
-     */
-    public function attest(
-        array $evidence,
-        string $challengeId,
-        ?string $policy = null,
-    ): AttestResult {
-        return $this->verify($evidence, $challengeId, $policy);
     }
 
     /**

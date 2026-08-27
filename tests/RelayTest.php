@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Rootherald\Tests;
 
 use PHPUnit\Framework\TestCase;
-use Rootherald\BackgroundCheck;
+use Rootherald\Client;
 use Rootherald\EnrollChallenge;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
@@ -16,13 +16,12 @@ use Rootherald\Verdict;
 /**
  * Tests for the Client ABI 2.0 backend-relay helpers: relayEnroll (incl. the
  * 201 vs 409 split), relayActivate, and the issueChallenge/verify renames with
- * their deprecated createChallenge/attest aliases.
  */
 final class RelayTest extends TestCase
 {
-    private function bg(callable $transport): BackgroundCheck
+    private function bg(callable $transport): Client
     {
-        return new BackgroundCheck(
+        return new Client(
             secretKey: 'rh_sk_test_xxx',
             baseUrl: 'https://api.example.test',
             httpTransport: $transport,
@@ -160,7 +159,7 @@ final class RelayTest extends TestCase
         $this->assertNull($result->enrolledAt);
     }
 
-    // ── rename + deprecated aliases ────────────────────────────────────────
+    // ── the primaries ──────────────────────────────────────────────────────
 
     public function testIssueChallengeHitsChallengeEndpoint(): void
     {
@@ -194,7 +193,7 @@ final class RelayTest extends TestCase
             ? ['status' => 200, 'body' => json_encode(['challengeId' => 'ch', 'nonce' => 'n', 'expiresAt' => 'z'])]
             : ['status' => 200, 'body' => json_encode(['verdict' => ['device' => ['verdict' => 'pass']]])]);
 
-        $this->assertSame('ch', $bg->createChallenge()->challengeId);
-        $this->assertSame(Verdict::ALLOW, $bg->attest([], challengeId: 'ch')->verdict);
+        $this->assertSame('ch', $bg->issueChallenge()->challengeId);
+        $this->assertSame(Verdict::ALLOW, $bg->verify([], challengeId: 'ch')->verdict);
     }
 }

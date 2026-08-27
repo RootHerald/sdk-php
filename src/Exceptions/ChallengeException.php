@@ -6,7 +6,7 @@ namespace Rootherald\Exceptions;
 
 /**
  * The challenge is unknown, expired, or already consumed (HTTP 409). Mint a
- * fresh one with BackgroundCheck::createChallenge.
+ * fresh one with Client::issueChallenge.
  */
 class ChallengeException extends HttpException
 {
