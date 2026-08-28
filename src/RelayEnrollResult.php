@@ -5,37 +5,27 @@ declare(strict_types=1);
 namespace Rootherald;
 
 /**
- * Resolved result of the enroll relay leg ({@see Client::relayEnroll}),
- * normalizing the enroll endpoint's asymmetric HTTP outcome into one value so
- * callers branch on {@see $alreadyEnrolled} instead of re-parsing HTTP status.
+ * Result of the enroll relay leg ({@see Client::relayEnroll}).
  *
- *  - **`alreadyEnrolled === false`** — a fresh `201` enroll: {@see $challenge}
- *    (the {@see EnrollChallenge}) is present. Relay it to the client's
- *    `EnrollComplete`, then call {@see Client::relayActivate}.
- *  - **`alreadyEnrolled === true`** — the `409` short-circuit: the device is
- *    already bound, so SKIP the activate leg and just use {@see $deviceId}.
- *    {@see $challenge} is null.
+ * Enrolment always issues a challenge, including for a device already known —
+ * re-enrolment is how a device rotates its attestation key, so short-circuiting
+ * it would make rotation impossible. Relay {@see $challenge} to the client's
+ * `EnrollComplete`, then call {@see Client::relayActivate}.
  *
- * Either way {@see $deviceId} is resolved.
+ * {@see $deviceId} is THIS tenant's alias for the device, not a global
+ * identifier: another tenant enrolling the same silicon is told a different one.
  */
 final class RelayEnrollResult
 {
     private function __construct(
         public readonly string $deviceId,
-        public readonly bool $alreadyEnrolled,
-        public readonly ?EnrollChallenge $challenge,
+        public readonly EnrollChallenge $challenge,
     ) {
     }
 
-    /** Fresh `201` enroll: the device must complete activation with $challenge. */
+    /** The device must complete activation with $challenge. */
     public static function fresh(EnrollChallenge $challenge): self
     {
-        return new self($challenge->deviceId, false, $challenge);
-    }
-
-    /** `409` short-circuit: the device is already bound; skip the activate leg. */
-    public static function alreadyEnrolled(string $deviceId): self
-    {
-        return new self($deviceId, true, null);
+        return new self($challenge->deviceId, $challenge);
     }
 }

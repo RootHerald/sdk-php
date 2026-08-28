@@ -49,24 +49,21 @@ an exception. Only protocol/auth/quota problems throw: `InvalidSecretKeyExceptio
 
 ### Enroll relay (one-time device bootstrap)
 
-The client's keyless enroll handshake is relayed in two legs. The enroll leg is
-asymmetric: a fresh device returns a MakeCredential challenge (`201`); an
-already-bound device short-circuits (`409`) and you skip activation.
+The client's keyless enroll handshake is relayed in two legs. Every enrolment
+returns a MakeCredential challenge, a device already known included —
+re-enrolment is how a device rotates its attestation key. `deviceId` is your
+tenant's alias for the device, not a global identifier.
 
 ```php
 // Leg 1 — relay the client's EnrollBegin() blob.
 $enroll = $rh->relayEnroll($enrollRequestBlob); // ekPublicKey, akPublicArea, platform, …
 
-if ($enroll->alreadyEnrolled) {
-    // 409: device already bound — use $enroll->deviceId, skip activation.
-} else {
-    // 201: hand $enroll->challenge to the client's EnrollComplete(), then…
-    $client->sendToClient($enroll->challenge->toArray());
+// Hand $enroll->challenge to the client's EnrollComplete(), then…
+$client->sendToClient($enroll->challenge->toArray());
 
-    // Leg 2 — relay the client's EnrollComplete() blob.
-    $activated = $rh->relayActivate($activationResponse); // deviceId, decryptedSecret
-    // $activated->deviceId is what you map to your user/account.
-}
+// Leg 2 — relay the client's EnrollComplete() blob.
+$activated = $rh->relayActivate($activationResponse); // deviceId, decryptedSecret
+// $activated->deviceId is what you map to your user/account.
 ```
 
 The verdict is computed by Root Herald and returned to your backend; it never

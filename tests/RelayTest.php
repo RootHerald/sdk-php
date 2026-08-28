@@ -52,7 +52,6 @@ final class RelayTest extends TestCase
         ]);
 
         $this->assertInstanceOf(RelayEnrollResult::class, $result);
-        $this->assertFalse($result->alreadyEnrolled);
         $this->assertSame('dev-1', $result->deviceId);
         $this->assertInstanceOf(EnrollChallenge::class, $result->challenge);
         $this->assertSame('cred==', $result->challenge->credentialBlob);
@@ -69,23 +68,7 @@ final class RelayTest extends TestCase
         );
     }
 
-    public function testRelayEnrollAlreadyEnrolled409SkipsActivate(): void
-    {
-        $bg = $this->bg(fn () => ['status' => 409, 'body' => json_encode(['deviceId' => 'dev-existing'])]);
 
-        $result = $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
-
-        $this->assertTrue($result->alreadyEnrolled);
-        $this->assertSame('dev-existing', $result->deviceId);
-        $this->assertNull($result->challenge);
-    }
-
-    public function testRelayEnroll409MissingDeviceIdThrows(): void
-    {
-        $bg = $this->bg(fn () => ['status' => 409, 'body' => json_encode(['note' => 'no id'])]);
-        $this->expectException(HttpException::class);
-        $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
-    }
 
     public function testRelayEnrollMissingFieldsThrowsInvalidArgument(): void
     {

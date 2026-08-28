@@ -211,15 +211,10 @@ final class Client
      * Enroll relay — leg 1. POST /api/v1/devices/enroll.
      *
      * Relays the client's `EnrollBegin()` blob to Root Herald with the `rh_sk_`
-     * secret and resolves the enroll endpoint's asymmetric response:
+     * secret and returns the {@see EnrollChallenge} to hand back to the client's
+     * `EnrollComplete`, whose result goes to {@see relayActivate}.
      *
-     *   - **201** — a fresh enroll: returns a {@see RelayEnrollResult} with
-     *     `alreadyEnrolled === false` and a {@see EnrollChallenge}. Hand the
-     *     challenge to the client's `EnrollComplete`, then relay the result to
-     *     {@see relayActivate}.
-     *   - **409** — the device is already bound: returns a {@see RelayEnrollResult}
-     *     with `alreadyEnrolled === true` (no challenge). SKIP the activate leg;
-     *     just use `deviceId`.
+     * `deviceId` is this tenant's alias for the device, not a global identifier.
      *
      * The client never holds the `rh_sk_` key and never talks to Root Herald;
      * this backend helper is the only thing that does.
@@ -241,17 +236,6 @@ final class Client
         }
 
         [$status, $respBody] = $this->rawPost('/api/v1/devices/enroll', $enrollRequestBlob);
-
-        // 409 = already enrolled: the body carries only deviceId. Resolve it and
-        // signal "skip activate" instead of treating it as an error.
-        if ($status === 409) {
-            $body = $this->decodeObject($status, $respBody);
-            $deviceId = is_string($body['deviceId'] ?? null) ? $body['deviceId'] : '';
-            if ($deviceId === '') {
-                throw new HttpException(409, $respBody, 'already-enrolled (409) response missing deviceId');
-            }
-            return RelayEnrollResult::alreadyEnrolled($deviceId);
-        }
 
         if ($status >= 400) {
             throw $this->mapError($status, $respBody);
@@ -282,8 +266,8 @@ final class Client
      *
      * Relays the client's `EnrollComplete()` blob (the decrypted credential
      * secret) to Root Herald, completing the EK->AK credential-activation
-     * handshake. Call this only when {@see relayEnroll} returned
-     * `alreadyEnrolled === false`.
+     * handshake, with the blob the client produced from {@see relayEnroll}'s
+     * challenge.
      *
      * @param array<string, mixed> $activationResponse opaque `EnrollComplete()` blob from the client
      *        (wire shape: deviceId, decryptedSecret, akPublicKey?)
@@ -331,7 +315,7 @@ final class Client
     /**
      * Issue an authenticated JSON POST and return the raw status + body, leaving
      * status interpretation to the caller (used by {@see relayEnroll}, which must
-     * branch on the enroll 409 instead of treating it as an error).
+     * inspect the status itself).
      *
      * @param array<string, mixed> $body
      * @return array{0: int, 1: string} [status, body]
