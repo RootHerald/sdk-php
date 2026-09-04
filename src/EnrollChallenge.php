@@ -6,7 +6,7 @@ namespace Rootherald;
 
 /**
  * The TPM2_MakeCredential challenge returned by the enroll relay leg
- * (`POST /api/v1/devices/enroll`, HTTP 201) — the input the customer's backend
+ * (`POST /api/v1/attest/enroll`, HTTP 201) — the input the customer's backend
  * hands to the dumb client's `EnrollComplete()`.
  *
  * Mirrors the contract's `EnrollActivationChallenge`. {@see $credentialBlob} and

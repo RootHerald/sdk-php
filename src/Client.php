@@ -20,10 +20,10 @@ use Rootherald\Exceptions\UnknownPolicyException;
  * authenticated with the customer's `rh_sk_` secret key. It mirrors the four
  * server-SDK helpers of `@rootherald/node`:
  *
- *   1. {@see relayEnroll}    — relay the client's enroll blob; `POST /api/v1/devices/enroll`
- *   2. {@see relayActivate}  — relay the client's activation blob; `POST /api/v1/devices/activate`
- *   3. {@see issueChallenge} — mint a relay-friendly nonce; `POST /api/v1/attestations/challenge`
- *   4. {@see verify}         — submit the evidence, get the verdict; `POST /api/v1/attestations/verify`
+ *   1. {@see relayEnroll}    — relay the client's enroll blob; `POST /api/v1/attest/enroll`
+ *   2. {@see relayActivate}  — relay the client's activation blob; `POST /api/v1/attest/activate`
+ *   3. {@see issueChallenge} — mint a relay-friendly nonce; `POST /api/v1/attest/challenge`
+ *   4. {@see verify}         — submit the evidence, get the verdict; `POST /api/v1/attest/verify`
  *
  * The verdict is computed by Root Herald and returned HERE, to the customer's
  * backend — it never travels through the client, which holds no key and gets no
@@ -121,7 +121,7 @@ final class Client
     }
 
     /**
-     * POST /api/v1/attestations/challenge — mint a relay-friendly nonce. Relay
+     * POST /api/v1/attest/challenge — mint a relay-friendly nonce. Relay
      * the nonce to the client; the client quotes over it, then submit the
      * resulting evidence with {@see verify} using the returned challengeId.
      *
@@ -133,7 +133,7 @@ final class Client
         if ($deviceHint !== null) {
             $body['deviceHint'] = $deviceHint;
         }
-        $data = $this->post('/api/v1/attestations/challenge', $body);
+        $data = $this->post('/api/v1/attest/challenge', $body);
         if (!isset($data['challengeId'], $data['nonce'], $data['expiresAt'])) {
             throw new HttpException(200, json_encode($data) ?: '', 'challenge response missing challengeId/nonce/expiresAt');
         }
@@ -145,7 +145,7 @@ final class Client
     }
 
     /**
-     * POST /api/v1/attestations/verify — submit the opaque evidence blob for
+     * POST /api/v1/attest/verify — submit the opaque evidence blob for
      * server-side appraisal and return the verdict.
      *
      * An un-enrolled / failing device is NOT an error — it returns a normal
@@ -177,7 +177,7 @@ final class Client
             $body['requestedDisclosureClass'] = $requestedDisclosureClass;
         }
 
-        $data = $this->post('/api/v1/attestations/verify', $body);
+        $data = $this->post('/api/v1/attest/verify', $body);
         if (!isset($data['verdict']) || !is_array($data['verdict'])) {
             throw new HttpException(200, json_encode($data) ?: '', 'verify response missing verdict');
         }
@@ -208,7 +208,7 @@ final class Client
     }
 
     /**
-     * Enroll relay — leg 1. POST /api/v1/devices/enroll.
+     * Enroll relay — leg 1. POST /api/v1/attest/enroll.
      *
      * Relays the client's `EnrollBegin()` blob to Root Herald with the `rh_sk_`
      * secret and returns the {@see EnrollChallenge} to hand back to the client's
@@ -235,7 +235,7 @@ final class Client
             );
         }
 
-        [$status, $respBody] = $this->rawPost('/api/v1/devices/enroll', $enrollRequestBlob);
+        [$status, $respBody] = $this->rawPost('/api/v1/attest/enroll', $enrollRequestBlob);
 
         if ($status >= 400) {
             throw $this->mapError($status, $respBody);
@@ -262,7 +262,7 @@ final class Client
     }
 
     /**
-     * Enroll relay — leg 2. POST /api/v1/devices/activate.
+     * Enroll relay — leg 2. POST /api/v1/attest/activate.
      *
      * Relays the client's `EnrollComplete()` blob (the decrypted credential
      * secret) to Root Herald, completing the EK->AK credential-activation
@@ -283,7 +283,7 @@ final class Client
             );
         }
 
-        $data = $this->post('/api/v1/devices/activate', $activationResponse);
+        $data = $this->post('/api/v1/attest/activate', $activationResponse);
         $resolvedId = is_string($data['deviceId'] ?? null) ? $data['deviceId'] : '';
         if ($resolvedId === '') {
             throw new HttpException(200, json_encode($data) ?: '', 'activate response missing deviceId');
