@@ -6,7 +6,7 @@ namespace Rootherald;
 
 /**
  * Terminal result of the activate relay leg
- * ({@see Client::relayActivate}, `POST /api/v1/devices/activate`).
+ * ({@see Client::relayActivate}, `POST /api/v1/attest/activate`).
  *
  * Mirrors the contract's `RelayActivateResponse`. {@see $deviceId} is the
  * load-bearing field the backend maps to its user/account; {@see $status} and

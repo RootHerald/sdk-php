@@ -49,7 +49,7 @@ final class ClientTest extends TestCase
         $challenge = $bg->issueChallenge('device-hint');
         $this->assertSame('ch_1', $challenge->challengeId);
         $this->assertSame('n_1', $challenge->nonce);
-        $this->assertStringEndsWith('/api/v1/attestations/challenge', $seen['url']);
+        $this->assertStringEndsWith('/api/v1/attest/challenge', $seen['url']);
         $this->assertSame('Bearer rh_sk_test_xxx', $seen['auth']);
     }
 

@@ -57,7 +57,7 @@ final class RelayTest extends TestCase
         $this->assertSame('cred==', $result->challenge->credentialBlob);
         $this->assertSame('enc==', $result->challenge->encryptedSecret);
         // wire shape: endpoint, auth, pass-through body
-        $this->assertStringEndsWith('/api/v1/devices/enroll', $seen['url']);
+        $this->assertStringEndsWith('/api/v1/attest/enroll', $seen['url']);
         $this->assertSame('Bearer rh_sk_test_xxx', $seen['auth']);
         $this->assertSame('ekpub==', $seen['body']['ekPublicKey']);
         $this->assertSame('windows', $seen['body']['platform']);
@@ -115,7 +115,7 @@ final class RelayTest extends TestCase
         $this->assertSame('dev-1', $result->deviceId);
         $this->assertSame('enrolled', $result->status);
         $this->assertSame('2026-06-30T00:00:00Z', $result->enrolledAt);
-        $this->assertStringEndsWith('/api/v1/devices/activate', $seen['url']);
+        $this->assertStringEndsWith('/api/v1/attest/activate', $seen['url']);
         $this->assertSame('secret==', $seen['body']['decryptedSecret']);
     }
 
@@ -155,7 +155,7 @@ final class RelayTest extends TestCase
         });
         $challenge = $bg->issueChallenge('hint');
         $this->assertSame('ch_1', $challenge->challengeId);
-        $this->assertStringEndsWith('/api/v1/attestations/challenge', $seen['url']);
+        $this->assertStringEndsWith('/api/v1/attest/challenge', $seen['url']);
     }
 
     public function testVerifyHitsVerifyEndpoint(): void
@@ -167,7 +167,7 @@ final class RelayTest extends TestCase
         });
         $result = $bg->verify(['quote' => '...'], challengeId: 'ch_1');
         $this->assertSame(Verdict::ALLOW, $result->verdict);
-        $this->assertStringEndsWith('/api/v1/attestations/verify', $seen['url']);
+        $this->assertStringEndsWith('/api/v1/attest/verify', $seen['url']);
     }
 
     public function testDeprecatedAliasesStillWork(): void
