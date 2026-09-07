@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Rootherald;
 
+use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\ChallengeException;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
+use Rootherald\Exceptions\PolicyDowngradeException;
 use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\UnknownPolicyException;
 
@@ -22,7 +24,7 @@ use Rootherald\Exceptions\UnknownPolicyException;
  *
  *   1. {@see relayEnroll}    — relay the client's enroll blob; `POST /api/v1/attest/enroll`
  *   2. {@see relayActivate}  — relay the client's activation blob; `POST /api/v1/attest/activate`
- *   3. {@see issueChallenge} — mint a relay-friendly nonce; `POST /api/v1/attest/challenge`
+ *   3. {@see issueChallenge} — mint a challenge carrying the ask; `POST /api/v1/attest/challenge`
  *   4. {@see verify}         — submit the evidence, get the verdict; `POST /api/v1/attest/verify`
  *
  * The verdict is computed by Root Herald and returned HERE, to the customer's
@@ -120,18 +122,50 @@ final class Client
         return false;
     }
 
+    /** Ask: prove which enrolled device this is. */
+    public const ASK_IDENTITY = 'identity';
+    /** Ask: prove the boot / configuration state (quote + event log). */
+    public const ASK_POSTURE = 'posture';
+    /** Ask: certify a fresh TPM-resident signing key under the AK. */
+    public const ASK_KEY = 'key';
+    /** The only key purpose today. */
+    public const KEY_PURPOSE_SIGN = 'sign';
+
     /**
-     * POST /api/v1/attest/challenge — mint a relay-friendly nonce. Relay
-     * the nonce to the client; the client quotes over it, then submit the
-     * resulting evidence with {@see verify} using the returned challengeId.
+     * POST /api/v1/attest/challenge — mint a challenge that carries the ask.
+     * Relay {@see Challenge::$challenge} to the client verbatim; it quotes
+     * over it, then submit the resulting evidence with {@see verify} using the
+     * returned challengeId.
      *
-     * @param string|null $deviceHint optional advisory hint identifying the device
+     * What the device must prove is fixed here, not at verify time: a policy
+     * named on the challenge is stored with it, and verify may only tighten it.
+     *
+     * @param string|null       $deviceHint optional advisory hint identifying the device
+     * @param list<string>|null $ask        any of ASK_IDENTITY / ASK_POSTURE / ASK_KEY;
+     *        null or empty means the server default, identity + posture
+     * @param string|null       $policy     tenant policy id/name or a "rootherald:builtin:*" name,
+     *        bound to the challenge
+     * @param string|null       $keyPurpose purpose of the certified key when asking for ASK_KEY
+     *        (KEY_PURPOSE_SIGN)
      */
-    public function issueChallenge(?string $deviceHint = null): Challenge
-    {
+    public function issueChallenge(
+        ?string $deviceHint = null,
+        ?array $ask = null,
+        ?string $policy = null,
+        ?string $keyPurpose = null,
+    ): Challenge {
         $body = [];
         if ($deviceHint !== null) {
             $body['deviceHint'] = $deviceHint;
+        }
+        if ($ask !== null && $ask !== []) {
+            $body['ask'] = array_values($ask);
+        }
+        if ($policy !== null) {
+            $body['policy'] = $policy;
+        }
+        if ($keyPurpose !== null) {
+            $body['keyPurpose'] = $keyPurpose;
         }
         $data = $this->post('/api/v1/attest/challenge', $body);
         if (!isset($data['challengeId'], $data['nonce'], $data['expiresAt'])) {
@@ -141,6 +175,7 @@ final class Client
             (string) $data['challengeId'],
             (string) $data['nonce'],
             (string) $data['expiresAt'],
+            is_string($data['challenge'] ?? null) ? $data['challenge'] : null,
         );
     }
 
@@ -154,7 +189,9 @@ final class Client
      *
      * @param array<string, mixed> $evidence    opaque blob from the client collector; passed through verbatim
      * @param string               $challengeId the single-use id from issueChallenge
-     * @param string|null          $policy      tenant policy id/name or a "rootherald:builtin:*" name; unknown names fail closed (422)
+     * @param string|null          $policy      tenant policy id/name or a "rootherald:builtin:*" name; unknown names fail
+     *        closed (422). When the challenge was issued with a policy this may only name one at least as
+     *        strict; a looser one is refused with {@see PolicyDowngradeException} (422 policy_downgrade)
      * @param string|null          $requestedDisclosureClass optional disclosure ceiling ("verdict"|"pseudonymous"|"derived"|"full"); omitted when null
      */
     public function verify(
@@ -199,11 +236,22 @@ final class Client
         }
         $enrollmentRequired = ($data['enrollmentRequired'] ?? null) === true;
 
+        // `key` is a top-level sibling too, present only on a passing verdict
+        // for a challenge that asked for a key.
+        $key = null;
+        if (($data['key'] ?? null) !== null) {
+            $key = CertifiedKey::fromWire($data['key']);
+            if ($key === null) {
+                throw new HttpException(200, json_encode($data) ?: '', 'verify response key missing keyId/jwk/certifiedAt');
+            }
+        }
+
         return new AttestResult(
             Verdict::fromRaw($raw),
             $verdictData,
             $assuranceClaimsMet,
             $enrollmentRequired,
+            $key,
         );
     }
 
@@ -219,12 +267,18 @@ final class Client
      * The client never holds the `rh_sk_` key and never talks to Root Herald;
      * this backend helper is the only thing that does.
      *
+     * Pass a live challengeId from {@see issueChallenge} to run admission
+     * against the policy stored on that challenge instead of the tenant
+     * default; a device that could never satisfy it is refused before it gets
+     * an AK ({@see AdmissionRefusedException}, 422 admission_refused).
+     *
      * @param array<string, mixed> $enrollRequestBlob opaque `EnrollBegin()` blob from the client
      *        (wire shape: ekPublicKey, akPublicArea, platform, ekCertPem?, ekCertificateChain?)
+     * @param string|null          $challengeId       sent as the `challengeId` query parameter; omitted when null
      *
      * @throws \InvalidArgumentException if the blob lacks ekPublicKey/akPublicArea
      */
-    public function relayEnroll(array $enrollRequestBlob): RelayEnrollResult
+    public function relayEnroll(array $enrollRequestBlob, ?string $challengeId = null): RelayEnrollResult
     {
         if (
             !is_string($enrollRequestBlob['ekPublicKey'] ?? null)
@@ -235,7 +289,11 @@ final class Client
             );
         }
 
-        [$status, $respBody] = $this->rawPost('/api/v1/attest/enroll', $enrollRequestBlob);
+        $path = '/api/v1/attest/enroll';
+        if ($challengeId !== null && $challengeId !== '') {
+            $path .= '?' . http_build_query(['challengeId' => $challengeId]);
+        }
+        [$status, $respBody] = $this->rawPost($path, $enrollRequestBlob);
 
         if ($status >= 400) {
             throw $this->mapError($status, $respBody);
@@ -254,11 +312,14 @@ final class Client
             );
         }
 
-        return RelayEnrollResult::fresh(new EnrollChallenge(
-            (string) $data['deviceId'],
-            (string) $data['credentialBlob'],
-            (string) $data['encryptedSecret'],
-        ));
+        return RelayEnrollResult::fresh(
+            new EnrollChallenge(
+                (string) $data['deviceId'],
+                (string) $data['credentialBlob'],
+                (string) $data['encryptedSecret'],
+            ),
+            is_string($data['challengeId'] ?? null) ? $data['challengeId'] : null,
+        );
     }
 
     /**
@@ -314,8 +375,7 @@ final class Client
 
     /**
      * Issue an authenticated JSON POST and return the raw status + body, leaving
-     * status interpretation to the caller (used by {@see relayEnroll}, which must
-     * inspect the status itself).
+     * status interpretation to the caller. $path may carry a query string.
      *
      * @param array<string, mixed> $body
      * @return array{0: int, 1: string} [status, body]
@@ -351,22 +411,36 @@ final class Client
         return is_array($decoded) ? $decoded : ['value' => $decoded];
     }
 
-    /** Map a non-2xx status to the matching typed exception, mirroring @rootherald/node. */
+    /**
+     * Map a non-2xx status to the matching typed exception, mirroring
+     * @rootherald/node. A 422 is split on the server's "error" code:
+     * policy_downgrade and admission_refused get their own classes; anything
+     * else is the policy-resolution failure.
+     */
     private function mapError(int $status, string $body): HttpException
     {
         $message = null;
+        $code = null;
         $parsed = json_decode($body, true);
         if (is_array($parsed)) {
-            $message = (is_string($parsed['message'] ?? null) ? $parsed['message'] : null)
-                ?? (is_string($parsed['error_description'] ?? null) ? $parsed['error_description'] : null);
+            foreach (['message', 'detail', 'error_description'] as $field) {
+                if (is_string($parsed[$field] ?? null)) {
+                    $message = $parsed[$field];
+                    break;
+                }
+            }
+            $code = (is_string($parsed['error'] ?? null) ? $parsed['error'] : null)
+                ?? (is_string($parsed['code'] ?? null) ? $parsed['code'] : null);
         }
-        return match ($status) {
-            401 => new InvalidSecretKeyException($status, $body, $message),
-            422 => new UnknownPolicyException($status, $body, $message),
-            409 => new ChallengeException($status, $body, $message),
-            400 => new InvalidEvidenceException($status, $body, $message),
-            429 => new QuotaExceededException($status, $body, $message),
-            default => new HttpException($status, $body, $message),
+        return match (true) {
+            $status === 401 => new InvalidSecretKeyException($status, $body, $message, $code),
+            $status === 422 && $code === 'policy_downgrade' => new PolicyDowngradeException($status, $body, $message, $code),
+            $status === 422 && $code === 'admission_refused' => new AdmissionRefusedException($status, $body, $message, $code),
+            $status === 422 => new UnknownPolicyException($status, $body, $message, $code),
+            $status === 409 => new ChallengeException($status, $body, $message, $code),
+            $status === 400 => new InvalidEvidenceException($status, $body, $message, $code),
+            $status === 429 => new QuotaExceededException($status, $body, $message, $code),
+            default => new HttpException($status, $body, $message, $code),
         };
     }
 

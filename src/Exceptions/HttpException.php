@@ -11,10 +11,16 @@ class HttpException extends RootheraldException
 {
     public string $errorCode = 'http_error';
 
+    /**
+     * @param string|null $serverError the server's "error" discriminator from
+     *        the response body (e.g. "unknown_policy", "policy_downgrade"),
+     *        or null when the body carried none
+     */
     public function __construct(
         public readonly int $status,
         public readonly string $body,
         ?string $message = null,
+        public readonly ?string $serverError = null,
     ) {
         parent::__construct($message ?? "HTTP {$status}: " . substr($body, 0, 200));
     }
