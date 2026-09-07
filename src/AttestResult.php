@@ -16,13 +16,25 @@ final class AttestResult
      *        (top-level `assuranceClaimsMet`), mirroring `@rootherald/node`
      * @param bool                 $enrollmentRequired the attest-first / enroll-on-miss signal
      *        (top-level `enrollmentRequired`): the device must (re-)enroll before it can pass
+     * @param CertifiedKey|null    $key                the key the appraisal certified (top-level
+     *        `key`); present only on a passing verdict for a challenge that asked for "key"
      */
     public function __construct(
         public readonly Verdict $verdict,
         public readonly array $verdictData,
         public readonly array $assuranceClaimsMet = [],
         public readonly bool $enrollmentRequired = false,
+        private readonly ?CertifiedKey $key = null,
     ) {
+    }
+
+    /**
+     * The TPM-resident signing key the appraisal certified, or null. Present
+     * only on a passing verdict for a challenge issued with "key" in its ask.
+     */
+    public function key(): ?CertifiedKey
+    {
+        return $this->key;
     }
 
     /**

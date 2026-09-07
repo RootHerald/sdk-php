@@ -7,6 +7,7 @@ namespace Rootherald\Tests;
 use PHPUnit\Framework\TestCase;
 use Rootherald\Client;
 use Rootherald\EnrollChallenge;
+use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
 use Rootherald\RelayActivateResult;
@@ -14,8 +15,8 @@ use Rootherald\RelayEnrollResult;
 use Rootherald\Verdict;
 
 /**
- * Tests for the Client ABI 2.0 backend-relay helpers: relayEnroll (incl. the
- * 201 vs 409 split), relayActivate, and the issueChallenge/verify renames with
+ * Tests for the backend-relay helpers: relayEnroll (with and without a
+ * challengeId), relayActivate, and the issueChallenge/verify primaries.
  */
 final class RelayTest extends TestCase
 {
@@ -66,6 +67,46 @@ final class RelayTest extends TestCase
             ['deviceId' => 'dev-1', 'credentialBlob' => 'cred==', 'encryptedSecret' => 'enc=='],
             $result->challenge->toArray(),
         );
+        // no challengeId: no query string, nothing echoed back
+        $this->assertStringNotContainsString('?', $seen['url']);
+        $this->assertNull($result->challengeId);
+    }
+
+    public function testRelayEnrollWithChallengeIdSendsTheQueryParam(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['url'] = $url;
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 201, 'body' => json_encode([
+                'deviceId' => 'dev-1',
+                'credentialBlob' => 'cred==',
+                'encryptedSecret' => 'enc==',
+                'challengeId' => 'ch 1',
+            ])];
+        });
+
+        $result = $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak=='], 'ch 1');
+
+        $this->assertStringEndsWith('/api/v1/attest/enroll?challengeId=ch+1', $seen['url']);
+        $this->assertArrayNotHasKey('challengeId', $seen['body']);
+        $this->assertSame('ch 1', $result->challengeId);
+        $this->assertSame('dev-1', $result->deviceId);
+    }
+
+    public function testRelayEnrollMaps422AdmissionRefused(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 422, 'body' => json_encode([
+            'error' => 'admission_refused', 'detail' => 'firmware TPM under a discrete-only policy',
+        ])]);
+        try {
+            $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak=='], 'ch_1');
+            $this->fail('expected AdmissionRefusedException');
+        } catch (AdmissionRefusedException $e) {
+            $this->assertSame('admission_refused', $e->errorCode);
+            $this->assertSame('admission_refused', $e->serverError);
+            $this->assertSame('firmware TPM under a discrete-only policy', $e->getMessage());
+        }
     }
 
 
@@ -170,7 +211,7 @@ final class RelayTest extends TestCase
         $this->assertStringEndsWith('/api/v1/attest/verify', $seen['url']);
     }
 
-    public function testDeprecatedAliasesStillWork(): void
+    public function testPrimariesRoundTripAgainstOneTransport(): void
     {
         $bg = $this->bg(fn (string $m, string $url) => str_ends_with($url, '/challenge')
             ? ['status' => 200, 'body' => json_encode(['challengeId' => 'ch', 'nonce' => 'n', 'expiresAt' => 'z'])]

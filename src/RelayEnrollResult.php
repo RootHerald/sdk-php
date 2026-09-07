@@ -20,12 +20,14 @@ final class RelayEnrollResult
     private function __construct(
         public readonly string $deviceId,
         public readonly EnrollChallenge $challenge,
+        /** The attestation challenge id this enrolment was admitted against, when the server echoed one. */
+        public readonly ?string $challengeId = null,
     ) {
     }
 
     /** The device must complete activation with $challenge. */
-    public static function fresh(EnrollChallenge $challenge): self
+    public static function fresh(EnrollChallenge $challenge, ?string $challengeId = null): self
     {
-        return new self($challenge->deviceId, $challenge);
+        return new self($challenge->deviceId, $challenge, $challengeId);
     }
 }

@@ -23,15 +23,18 @@ use Rootherald\Verdict;
 // is rejected.
 $rh = new Client(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
 
-// 1) Mint a relay-friendly nonce; send $challenge->nonce down to the client.
-$challenge = $rh->issueChallenge();
+// 1) Mint a challenge; relay $challenge->challenge to the client verbatim.
+//    The challenge carries the ask: what the device must prove is fixed here.
+$challenge = $rh->issueChallenge(
+    ask: [Client::ASK_IDENTITY, Client::ASK_POSTURE], // the default when omitted
+    policy: 'rootherald:builtin:strict-hardware',      // optional, bound to the challenge
+);
 
-// 2) The client quotes over the nonce and returns an opaque $evidence array;
-//    relay it for appraisal.
+// 2) The client quotes over the challenge and returns an opaque $evidence
+//    array; relay it for appraisal.
 $result = $rh->verify(
     evidence: $evidence,
     challengeId: $challenge->challengeId,
-    policy: 'rootherald:builtin:strict-hardware', // optional
 );
 
 if ($result->verdict === Verdict::ALLOW) {
@@ -39,13 +42,37 @@ if ($result->verdict === Verdict::ALLOW) {
 }
 ```
 
-> `createChallenge()` / `attest()` are retained as deprecated aliases of
-> `issueChallenge()` / `verify()`.
+A policy named at verify time may only tighten the challenge's; a looser one
+is refused with `PolicyDowngradeException` (422 `policy_downgrade`).
 
 An un-enrolled / failing device is a verdict (`Verdict::DENY`/`WARN`), **not**
 an exception. Only protocol/auth/quota problems throw: `InvalidSecretKeyException`
-(401), `UnknownPolicyException` (422), `ChallengeException` (409),
-`InvalidEvidenceException` (400), `QuotaExceededException` (429).
+(401), `UnknownPolicyException` / `PolicyDowngradeException` /
+`AdmissionRefusedException` (422, told apart by `$serverError`),
+`ChallengeException` (409), `InvalidEvidenceException` (400),
+`QuotaExceededException` (429).
+
+### Certified device key
+
+Ask for `key` and a passing verdict also certifies a fresh TPM-resident P-256
+signing key. Store the `CertifiedKey` against the user; later signatures from
+the device verify locally, with no Root Herald call.
+
+```php
+use Rootherald\KeySignatures;
+
+$challenge = $rh->issueChallenge(
+    ask: [Client::ASK_IDENTITY, Client::ASK_KEY],
+    keyPurpose: Client::KEY_PURPOSE_SIGN,
+);
+
+$result = $rh->verify(evidence: $evidence, challengeId: $challenge->challengeId);
+$key = $result->key();               // present only on a pass with a key ask
+store($userId, $key->keyId, $key->jwk);
+
+// Later: the device signed $message with that key (raw r||s or DER).
+$ok = KeySignatures::verify($key->jwk, $message, $signature);
+```
 
 ### Enroll relay (one-time device bootstrap)
 
@@ -55,8 +82,10 @@ re-enrolment is how a device rotates its attestation key. `deviceId` is your
 tenant's alias for the device, not a global identifier.
 
 ```php
-// Leg 1 — relay the client's EnrollBegin() blob.
-$enroll = $rh->relayEnroll($enrollRequestBlob); // ekPublicKey, akPublicArea, platform, …
+// Leg 1 — relay the client's EnrollBegin() blob. Pass a live challenge id to
+// run admission against that challenge's policy; a device that could never
+// satisfy it is refused with AdmissionRefusedException (422 admission_refused).
+$enroll = $rh->relayEnroll($enrollRequestBlob, $challenge->challengeId); // challengeId optional
 
 // Hand $enroll->challenge to the client's EnrollComplete(), then…
 $client->sendToClient($enroll->challenge->toArray());
@@ -71,4 +100,4 @@ travels through the client.
 
 ## Samples
 
-- [`samples/laravel-demo`](samples/laravel-demo): Laravel `POST /attest` Background-Check route
+- [`samples/laravel-demo`](samples/laravel-demo): Laravel `POST /challenge`, `POST /attest` and `POST /verify-signature` routes
