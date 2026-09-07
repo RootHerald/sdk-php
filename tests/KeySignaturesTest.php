@@ -167,6 +167,9 @@ final class KeySignaturesTest extends TestCase
     {
         $f = self::fixture('P-256');
         $raw = self::derToRaw(self::signDer($f, self::MESSAGE), 32);
-        $this->assertSame(1, openssl_verify(self::MESSAGE, KeySignatures::rawToDer($raw), $f['key'], OPENSSL_ALGO_SHA256));
+        // OpenSSL 3 refuses to verify with a private-key object, so hand it the public half.
+        $public = openssl_pkey_get_public(openssl_pkey_get_details($f['key'])['key']);
+        self::assertNotFalse($public);
+        $this->assertSame(1, openssl_verify(self::MESSAGE, KeySignatures::rawToDer($raw), $public, OPENSSL_ALGO_SHA256));
     }
 }
