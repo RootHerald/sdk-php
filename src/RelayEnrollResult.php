@@ -7,8 +7,8 @@ namespace Rootherald;
 /**
  * Result of the enroll relay leg ({@see Client::relayEnroll}).
  *
- * Enrolment always issues a challenge, including for a device already known —
- * re-enrolment is how a device rotates its attestation key, so short-circuiting
+ * Enrollment always issues a challenge, including for a device already known —
+ * re-enrollment is how a device rotates its attestation key, so short-circuiting
  * it would make rotation impossible. Relay {@see $challenge} to the client's
  * `EnrollComplete`, then call {@see Client::relayActivate}.
  *
@@ -20,7 +20,7 @@ final class RelayEnrollResult
     private function __construct(
         public readonly string $deviceId,
         public readonly EnrollChallenge $challenge,
-        /** The attestation challenge id this enrolment was admitted against, when the server echoed one. */
+        /** The attestation challenge id this enrollment was admitted against, when the server echoed one. */
         public readonly ?string $challengeId = null,
     ) {
     }

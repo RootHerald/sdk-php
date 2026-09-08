@@ -76,9 +76,9 @@ $ok = KeySignatures::verify($key->jwk, $message, $signature);
 
 ### Enroll relay (one-time device bootstrap)
 
-The client's keyless enroll handshake is relayed in two legs. Every enrolment
+The client's keyless enroll handshake is relayed in two legs. Every enrollment
 returns a MakeCredential challenge, a device already known included —
-re-enrolment is how a device rotates its attestation key. `deviceId` is your
+re-enrollment is how a device rotates its attestation key. `deviceId` is your
 tenant's alias for the device, not a global identifier.
 
 ```php
