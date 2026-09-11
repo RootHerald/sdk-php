@@ -27,7 +27,6 @@ $rh = new Client(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
 //    The challenge carries the ask: what the device must prove is fixed here.
 $challenge = $rh->issueChallenge(
     ask: [Client::ASK_IDENTITY, Client::ASK_POSTURE], // the default when omitted
-    policy: 'rootherald:builtin:strict-hardware',      // optional, bound to the challenge
 );
 
 // 2) The client quotes over the challenge and returns an opaque $evidence
@@ -42,13 +41,17 @@ if ($result->verdict === Verdict::ALLOW) {
 }
 ```
 
-A policy named at verify time may only tighten the challenge's; a looser one
-is refused with `PolicyDowngradeException` (422 `policy_downgrade`).
+Policies bind to your API key, not to calls. The key carries an identity
+policy and, on Pro, a posture policy; a posture ask runs under the posture
+policy and everything else under the identity policy. The resolved policy is
+pinned on the challenge when it is minted. Change what a key enforces from the
+dashboard or `PUT /api/v1/admin/api-keys/{id}/policies`; a `policy` field in a
+hand-built request body is refused with `400 policy_bound_to_key`.
 
 An un-enrolled / failing device is a verdict (`Verdict::DENY`/`WARN`), **not**
 an exception. Only protocol/auth/quota problems throw: `InvalidSecretKeyException`
-(401), `UnknownPolicyException` / `PolicyDowngradeException` /
-`AdmissionRefusedException` (422, told apart by `$serverError`),
+(401), `UnknownPolicyException` / `AdmissionRefusedException` (422, told
+apart by `$serverError`),
 `ChallengeException` (409), `InvalidEvidenceException` (400),
 `QuotaExceededException` (429).
 
@@ -82,9 +85,9 @@ re-enrollment is how a device rotates its attestation key. `deviceId` is your
 tenant's alias for the device, not a global identifier.
 
 ```php
-// Leg 1 — relay the client's EnrollBegin() blob. Pass a live challenge id to
-// run admission against that challenge's policy; a device that could never
-// satisfy it is refused with AdmissionRefusedException (422 admission_refused).
+// Leg 1 — relay the client's EnrollBegin() blob. Admission runs under the
+// key's identity policy; a device that could never satisfy it is refused
+// with AdmissionRefusedException (422 admission_refused).
 $enroll = $rh->relayEnroll($enrollRequestBlob, $challenge->challengeId); // challengeId optional
 
 // Hand $enroll->challenge to the client's EnrollComplete(), then…

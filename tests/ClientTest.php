@@ -11,7 +11,6 @@ use Rootherald\Exceptions\ChallengeException;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
-use Rootherald\Exceptions\PolicyDowngradeException;
 use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\UnknownPolicyException;
 use Rootherald\Verdict;
@@ -74,15 +73,15 @@ final class ClientTest extends TestCase
         $challenge = $bg->issueChallenge(
             deviceHint: 'hint',
             ask: [Client::ASK_IDENTITY, Client::ASK_KEY],
-            policy: 'rootherald:builtin:strict-hardware',
             keyPurpose: Client::KEY_PURPOSE_SIGN,
         );
         $this->assertSame('rhc1.bm9uY2U.eyJhc2siOlsia2V5Il19', $challenge->challenge);
         $this->assertSame('n_1', $challenge->nonce);
         $this->assertSame(['identity', 'key'], $seen['body']['ask']);
-        $this->assertSame('rootherald:builtin:strict-hardware', $seen['body']['policy']);
         $this->assertSame('sign', $seen['body']['keyPurpose']);
         $this->assertSame('hint', $seen['body']['deviceHint']);
+        // Policies bind to the API key; the server refuses the field with 400.
+        $this->assertArrayNotHasKey('policy', $seen['body']);
     }
 
     public function testIssueChallengeOmitsEveryUnsetField(): void
@@ -162,22 +161,6 @@ final class ClientTest extends TestCase
         $bg->verify([], challengeId: 'ch_1');
     }
 
-    public function testMaps422PolicyDowngrade(): void
-    {
-        $bg = $this->bg(fn () => ['status' => 422, 'body' => json_encode([
-            'error' => 'policy_downgrade', 'message' => 'verify policy is looser than the challenge',
-        ])]);
-        try {
-            $bg->verify([], challengeId: 'ch_1', policy: 'loose');
-            $this->fail('expected PolicyDowngradeException');
-        } catch (PolicyDowngradeException $e) {
-            $this->assertSame('policy_downgrade', $e->errorCode);
-            $this->assertSame('policy_downgrade', $e->serverError);
-            $this->assertSame(422, $e->status);
-            $this->assertSame('verify policy is looser than the challenge', $e->getMessage());
-        }
-    }
-
     public function testServerErrorCodeRidesOnEveryTypedException(): void
     {
         $bg = $this->bg(fn () => ['status' => 422, 'body' => '{"error":"unknown_policy"}']);
@@ -218,6 +201,7 @@ final class ClientTest extends TestCase
         $this->assertFalse($result->enrollmentRequired);
         $this->assertSame('ch_1', $seen['body']['challengeId']);
         $this->assertSame('...', $seen['body']['evidence']['quote']);
+        $this->assertArrayNotHasKey('policy', $seen['body']);
     }
 
     public function testVerifySendsRequestedDisclosureClass(): void

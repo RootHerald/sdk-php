@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace Rootherald\Exceptions;
 
 /**
- * The named policy is unknown or not owned by this tenant (HTTP 422). Foreign
- * or unrecognised policy names fail closed.
+ * A policy bound to the API key no longer exists (HTTP 422, server code
+ * "unknown_policy"). Nothing is substituted; the call fails closed until the
+ * key is bound to a policy that exists.
  */
 class UnknownPolicyException extends HttpException
 {

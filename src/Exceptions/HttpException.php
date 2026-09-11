@@ -13,7 +13,7 @@ class HttpException extends RootheraldException
 
     /**
      * @param string|null $serverError the server's "error" discriminator from
-     *        the response body (e.g. "unknown_policy", "policy_downgrade"),
+     *        the response body (e.g. "unknown_policy", "admission_refused"),
      *        or null when the body carried none
      */
     public function __construct(
