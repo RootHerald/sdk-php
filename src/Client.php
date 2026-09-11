@@ -9,7 +9,6 @@ use Rootherald\Exceptions\ChallengeException;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
-use Rootherald\Exceptions\PolicyDowngradeException;
 use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\UnknownPolicyException;
 
@@ -137,21 +136,22 @@ final class Client
      * over it, then submit the resulting evidence with {@see verify} using the
      * returned challengeId.
      *
-     * What the device must prove is fixed here, not at verify time: a policy
-     * named on the challenge is stored with it, and verify may only tighten it.
+     * What the device must prove is fixed here, not at verify time. Policies
+     * bind to the API key: the server resolves the policy from the key that
+     * mints the challenge and pins it on the challenge, so nothing between
+     * the two calls can change it. A `policy` field in a hand-built body is
+     * refused with 400 policy_bound_to_key; bind one from the dashboard or
+     * `PUT /api/v1/admin/api-keys/{id}/policies`.
      *
      * @param string|null       $deviceHint optional advisory hint identifying the device
      * @param list<string>|null $ask        any of ASK_IDENTITY / ASK_POSTURE / ASK_KEY;
      *        null or empty means the server default, identity + posture
-     * @param string|null       $policy     tenant policy id/name or a "rootherald:builtin:*" name,
-     *        bound to the challenge
      * @param string|null       $keyPurpose purpose of the certified key when asking for ASK_KEY
      *        (KEY_PURPOSE_SIGN)
      */
     public function issueChallenge(
         ?string $deviceHint = null,
         ?array $ask = null,
-        ?string $policy = null,
         ?string $keyPurpose = null,
     ): Challenge {
         $body = [];
@@ -160,9 +160,6 @@ final class Client
         }
         if ($ask !== null && $ask !== []) {
             $body['ask'] = array_values($ask);
-        }
-        if ($policy !== null) {
-            $body['policy'] = $policy;
         }
         if ($keyPurpose !== null) {
             $body['keyPurpose'] = $keyPurpose;
@@ -187,17 +184,19 @@ final class Client
      * AttestResult carrying Verdict::DENY/WARN. Only protocol/auth/quota
      * problems raise an exception.
      *
+     * The appraisal runs under the policy pinned on the challenge at mint,
+     * resolved from the API key; a `policy` field in a hand-built body is
+     * refused with 400 policy_bound_to_key. A bound policy that no longer
+     * exists raises {@see UnknownPolicyException} (422 unknown_policy);
+     * nothing is substituted.
+     *
      * @param array<string, mixed> $evidence    opaque blob from the client collector; passed through verbatim
      * @param string               $challengeId the single-use id from issueChallenge
-     * @param string|null          $policy      tenant policy id/name or a "rootherald:builtin:*" name; unknown names fail
-     *        closed (422). When the challenge was issued with a policy this may only name one at least as
-     *        strict; a looser one is refused with {@see PolicyDowngradeException} (422 policy_downgrade)
      * @param string|null          $requestedDisclosureClass optional disclosure ceiling ("verdict"|"pseudonymous"|"derived"|"full"); omitted when null
      */
     public function verify(
         array $evidence,
         string $challengeId,
-        ?string $policy = null,
         ?string $requestedDisclosureClass = null,
     ): AttestResult {
         if ($challengeId === '') {
@@ -207,9 +206,6 @@ final class Client
             'challengeId' => $challengeId,
             'evidence' => $evidence,
         ];
-        if ($policy !== null) {
-            $body['policy'] = $policy;
-        }
         if ($requestedDisclosureClass !== null) {
             $body['requestedDisclosureClass'] = $requestedDisclosureClass;
         }
@@ -267,9 +263,9 @@ final class Client
      * The client never holds the `rh_sk_` key and never talks to Root Herald;
      * this backend helper is the only thing that does.
      *
-     * Pass a live challengeId from {@see issueChallenge} to run admission
-     * against the policy stored on that challenge instead of the tenant
-     * default; a device that could never satisfy it is refused before it gets
+     * Admission runs under the identity policy bound to the API key, pinned
+     * on the challenge when a live challengeId from {@see issueChallenge} is
+     * passed; a device that could never satisfy it is refused before it gets
      * an AK ({@see AdmissionRefusedException}, 422 admission_refused).
      *
      * @param array<string, mixed> $enrollRequestBlob opaque `EnrollBegin()` blob from the client
@@ -414,8 +410,8 @@ final class Client
     /**
      * Map a non-2xx status to the matching typed exception, mirroring
      * @rootherald/node. A 422 is split on the server's "error" code:
-     * policy_downgrade and admission_refused get their own classes; anything
-     * else is the policy-resolution failure.
+     * admission_refused gets its own class; anything else is the
+     * policy-resolution failure.
      */
     private function mapError(int $status, string $body): HttpException
     {
@@ -434,7 +430,6 @@ final class Client
         }
         return match (true) {
             $status === 401 => new InvalidSecretKeyException($status, $body, $message, $code),
-            $status === 422 && $code === 'policy_downgrade' => new PolicyDowngradeException($status, $body, $message, $code),
             $status === 422 && $code === 'admission_refused' => new AdmissionRefusedException($status, $body, $message, $code),
             $status === 422 => new UnknownPolicyException($status, $body, $message, $code),
             $status === 409 => new ChallengeException($status, $body, $message, $code),

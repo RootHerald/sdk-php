@@ -2,11 +2,21 @@
 
 ## Unreleased
 
+### Removed
+
+- Policies bind to API keys. The `policy` parameter is gone from
+  `Client::issueChallenge()` and `Client::verify()`; the server refuses the
+  field with `400 policy_bound_to_key`. Bind a policy to the key from the
+  dashboard or `PUT /api/v1/admin/api-keys/{id}/policies`.
+- `PolicyDowngradeException` is removed with the parameter that produced it.
+  `UnknownPolicyException` (422 `unknown_policy`) now means a policy bound to
+  the key no longer exists.
+
 ### Added
 
 - The challenge carries the ask. `Client::issueChallenge()` takes `ask`
-  (`Client::ASK_IDENTITY` / `ASK_POSTURE` / `ASK_KEY`), `policy` and
-  `keyPurpose` after the existing `deviceHint`; `Challenge` gains
+  (`Client::ASK_IDENTITY` / `ASK_POSTURE` / `ASK_KEY`) and `keyPurpose`
+  after the existing `deviceHint`; `Challenge` gains
   `$challenge`, the string to relay to the client verbatim. Omitting `ask`
   keeps the server default of identity + posture.
 - `CertifiedKey`; `AttestResult::key()` returns the key the appraisal
@@ -17,12 +27,12 @@
   SHA-384 (P-384) with ext-openssl, accepting raw `r||s` and DER. Returns
   `false` for any malformed signature. `ext-openssl` is now required.
 - `Client::relayEnroll(array $blob, ?string $challengeId = null)` sends the
-  `challengeId` query parameter so admission runs against that challenge's
-  policy; `RelayEnrollResult::$challengeId` echoes it when the server does.
-- `HttpException::$serverError` exposes the server's `error` code. New 422
-  exceptions keyed on it: `PolicyDowngradeException` (`policy_downgrade`) and
-  `AdmissionRefusedException` (`admission_refused`). Other 422s remain
-  `UnknownPolicyException`.
+  `challengeId` query parameter so admission runs under the identity policy
+  pinned on that challenge; `RelayEnrollResult::$challengeId` echoes it when
+  the server does.
+- `HttpException::$serverError` exposes the server's `error` code. A 422
+  with `admission_refused` raises `AdmissionRefusedException`; other 422s
+  remain `UnknownPolicyException`.
 
 ### Fixed
 
