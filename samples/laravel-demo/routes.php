@@ -29,7 +29,7 @@ Route::post('/challenge', function () use ($rh) {
     );
 
     return [
-        'challengeId' => $challenge->challengeId,
+        'nonce' => $challenge->nonce,
         'challenge' => $challenge->challenge,
         'expiresAt' => $challenge->expiresAt,
     ];
@@ -37,13 +37,13 @@ Route::post('/challenge', function () use ($rh) {
 
 /*
  * 2) The client quoted over the challenge and POSTs its opaque evidence blob
- *    here with the challenge id; this server appraises it with the rh_sk_
- *    secret key. The client never holds a key or calls Root Herald.
+ *    here with the nonce; this server appraises it with the rh_sk_ secret
+ *    key. The client never holds a key or calls Root Herald.
  */
 Route::post('/attest', function () use ($rh) {
     $result = $rh->verify(
         evidence: (array) request()->input('evidence', []),
-        challengeId: (string) request()->input('challengeId'),
+        nonce: (string) request()->input('nonce'),
     );
 
     if ($result->verdict !== Verdict::ALLOW) {

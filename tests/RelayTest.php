@@ -15,11 +15,15 @@ use Rootherald\RelayEnrollResult;
 use Rootherald\Verdict;
 
 /**
- * Tests for the backend-relay helpers: relayEnroll (with and without a
- * challengeId), relayActivate, and the issueChallenge/verify primaries.
+ * Tests for the backend-relay helpers: relayEnroll per platform,
+ * relayActivate, and the issueChallenge/verify primaries.
  */
 final class RelayTest extends TestCase
 {
+    private const NONCE = 'q83vASNFZ4mrze8BI0VniavN7wEjRWeJq83vASNFZ4k';
+    private const CHALLENGE = 'rhc1.' . self::NONCE . '.eyJhc2siOlsiaWRlbnRpdHkiXX0';
+    private const ENROLLMENT_ID = '0b6d3c1a-7f2e-4c9b-9d3a-5e1f2a3b4c5d';
+
     private function bg(callable $transport): Client
     {
         return new Client(
@@ -31,7 +35,7 @@ final class RelayTest extends TestCase
 
     // ── relayEnroll ────────────────────────────────────────────────────────
 
-    public function testRelayEnrollFresh201ReturnsChallenge(): void
+    public function testRelayEnrollTpm201ReturnsMakeCredentialChallenge(): void
     {
         $seen = [];
         $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
@@ -39,59 +43,82 @@ final class RelayTest extends TestCase
             $seen['auth'] = $headers['Authorization'] ?? null;
             $seen['body'] = json_decode((string) $body, true);
             return ['status' => 201, 'body' => json_encode([
-                'deviceId' => 'dev-1',
+                'enrollmentId' => self::ENROLLMENT_ID,
                 'credentialBlob' => 'cred==',
                 'encryptedSecret' => 'enc==',
             ])];
         });
 
-        $result = $bg->relayEnroll([
+        $blob = [
             'ekPublicKey' => 'ekpub==',
             'akPublicArea' => 'akpub==',
             'platform' => 'windows',
             'ekCertPem' => '-----BEGIN CERTIFICATE-----',
-        ]);
+            'tpmSelfReport' => ['manufacturer' => 'INTC', 'vendorString' => 'Intel'],
+        ];
+        $result = $bg->relayEnroll($blob);
 
         $this->assertInstanceOf(RelayEnrollResult::class, $result);
-        $this->assertSame('dev-1', $result->deviceId);
         $this->assertInstanceOf(EnrollChallenge::class, $result->challenge);
+        $this->assertSame(self::ENROLLMENT_ID, $result->challenge->enrollmentId);
         $this->assertSame('cred==', $result->challenge->credentialBlob);
         $this->assertSame('enc==', $result->challenge->encryptedSecret);
-        // wire shape: endpoint, auth, pass-through body
+        $this->assertNull($result->challenge->challengeNonce);
+        // wire shape: endpoint with no query string, auth, pass-through body
         $this->assertStringEndsWith('/api/v1/attest/enroll', $seen['url']);
+        $this->assertStringNotContainsString('?', $seen['url']);
         $this->assertSame('Bearer rh_sk_test_xxx', $seen['auth']);
-        $this->assertSame('ekpub==', $seen['body']['ekPublicKey']);
-        $this->assertSame('windows', $seen['body']['platform']);
-        // challenge round-trips back to the wire shape the client consumes
+        $this->assertSame($blob, $seen['body']);
+        // the challenge round-trips to exactly the 201 body the client consumes
         $this->assertSame(
-            ['deviceId' => 'dev-1', 'credentialBlob' => 'cred==', 'encryptedSecret' => 'enc=='],
+            ['enrollmentId' => self::ENROLLMENT_ID, 'credentialBlob' => 'cred==', 'encryptedSecret' => 'enc=='],
             $result->challenge->toArray(),
         );
-        // no challengeId: no query string, nothing echoed back
-        $this->assertStringNotContainsString('?', $seen['url']);
-        $this->assertNull($result->challengeId);
     }
 
-    public function testRelayEnrollWithChallengeIdSendsTheQueryParam(): void
+    public function testRelayEnrollMacos201ReturnsChallengeNonce(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 201, 'body' => json_encode([
+            'enrollmentId' => self::ENROLLMENT_ID,
+            'challengeNonce' => 'bm9uY2U=',
+        ])]);
+
+        $result = $bg->relayEnroll(['ekPublicKey' => 'BJ4=', 'akPublicArea' => 'BJ4=', 'platform' => 'macos']);
+
+        $this->assertSame(self::ENROLLMENT_ID, $result->challenge?->enrollmentId);
+        $this->assertSame('bm9uY2U=', $result->challenge?->challengeNonce);
+        $this->assertNull($result->challenge?->credentialBlob);
+        $this->assertSame(
+            ['enrollmentId' => self::ENROLLMENT_ID, 'challengeNonce' => 'bm9uY2U='],
+            $result->challenge?->toArray(),
+        );
+    }
+
+    public function testRelayEnrollIosAcceptsAnEmpty201(): void
     {
         $seen = [];
         $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
-            $seen['url'] = $url;
             $seen['body'] = json_decode((string) $body, true);
-            return ['status' => 201, 'body' => json_encode([
-                'deviceId' => 'dev-1',
-                'credentialBlob' => 'cred==',
-                'encryptedSecret' => 'enc==',
-                'challengeId' => 'ch 1',
-            ])];
+            return ['status' => 201, 'body' => '{}'];
         });
 
-        $result = $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak=='], 'ch 1');
+        $blob = [
+            'platform' => 'ios',
+            'iosKeyId' => 'a2V5',
+            'iosAttestationObject' => 'Y2Jvcg==',
+            'nonce' => self::NONCE,
+        ];
+        $result = $bg->relayEnroll($blob);
 
-        $this->assertStringEndsWith('/api/v1/attest/enroll?challengeId=ch+1', $seen['url']);
-        $this->assertArrayNotHasKey('challengeId', $seen['body']);
-        $this->assertSame('ch 1', $result->challengeId);
-        $this->assertSame('dev-1', $result->deviceId);
+        $this->assertNull($result->challenge);
+        $this->assertSame($blob, $seen['body']);
+    }
+
+    public function testRelayEnrollIosBlobMustCarryItsOwnFields(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 201, 'body' => '{}']);
+        $this->expectException(\InvalidArgumentException::class);
+        $bg->relayEnroll(['platform' => 'ios', 'iosKeyId' => 'a2V5', 'iosAttestationObject' => 'Y2Jvcg==']); // missing nonce
     }
 
     public function testRelayEnrollMaps422AdmissionRefused(): void
@@ -100,7 +127,7 @@ final class RelayTest extends TestCase
             'error' => 'admission_refused', 'detail' => 'firmware TPM under a discrete-only policy',
         ])]);
         try {
-            $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak=='], 'ch_1');
+            $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
             $this->fail('expected AdmissionRefusedException');
         } catch (AdmissionRefusedException $e) {
             $this->assertSame('admission_refused', $e->errorCode);
@@ -109,8 +136,6 @@ final class RelayTest extends TestCase
         }
     }
 
-
-
     public function testRelayEnrollMissingFieldsThrowsInvalidArgument(): void
     {
         $bg = $this->bg(fn () => ['status' => 201, 'body' => '{}']);
@@ -118,9 +143,27 @@ final class RelayTest extends TestCase
         $bg->relayEnroll(['ekPublicKey' => 'ek==']); // missing akPublicArea
     }
 
-    public function testRelayEnrollMalformed201ResponseThrows(): void
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function malformedEnroll201s(): array
     {
-        $bg = $this->bg(fn () => ['status' => 201, 'body' => json_encode(['deviceId' => 'dev-1'])]); // no credentialBlob/encryptedSecret
+        return [
+            'empty for a TPM blob' => [[]],
+            'no proof material' => [['enrollmentId' => self::ENROLLMENT_ID]],
+            'half a MakeCredential' => [['enrollmentId' => self::ENROLLMENT_ID, 'credentialBlob' => 'cred==']],
+            'empty enrollmentId' => [['enrollmentId' => '', 'challengeNonce' => 'bm9uY2U=']],
+            'deviceId instead of enrollmentId' => [[
+                'deviceId' => 'dev-1', 'credentialBlob' => 'cred==', 'encryptedSecret' => 'enc==',
+            ]],
+        ];
+    }
+
+    /**
+     * @dataProvider malformedEnroll201s
+     * @param array<string, mixed> $body
+     */
+    public function testRelayEnrollMalformed201ResponseThrows(array $body): void
+    {
+        $bg = $this->bg(fn () => ['status' => 201, 'body' => json_encode($body)]);
         $this->expectException(HttpException::class);
         $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
     }
@@ -134,7 +177,7 @@ final class RelayTest extends TestCase
 
     // ── relayActivate ──────────────────────────────────────────────────────
 
-    public function testRelayActivateSuccess(): void
+    public function testRelayActivateTpmSuccess(): void
     {
         $seen = [];
         $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
@@ -148,7 +191,7 @@ final class RelayTest extends TestCase
         });
 
         $result = $bg->relayActivate([
-            'deviceId' => 'dev-1',
+            'enrollmentId' => self::ENROLLMENT_ID,
             'decryptedSecret' => 'secret==',
         ]);
 
@@ -157,30 +200,69 @@ final class RelayTest extends TestCase
         $this->assertSame('enrolled', $result->status);
         $this->assertSame('2026-06-30T00:00:00Z', $result->enrolledAt);
         $this->assertStringEndsWith('/api/v1/attest/activate', $seen['url']);
-        $this->assertSame('secret==', $seen['body']['decryptedSecret']);
+        $this->assertStringNotContainsString('?', $seen['url']);
+        $this->assertSame(
+            ['enrollmentId' => self::ENROLLMENT_ID, 'decryptedSecret' => 'secret=='],
+            $seen['body'],
+        );
     }
 
-    public function testRelayActivateMissingFieldsThrowsInvalidArgument(): void
+    public function testRelayActivateMacosSendsTheSignature(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode(['deviceId' => 'dev-1'])];
+        });
+
+        $result = $bg->relayActivate(['enrollmentId' => self::ENROLLMENT_ID, 'signature' => 'c2ln']);
+
+        $this->assertSame('dev-1', $result->deviceId);
+        $this->assertSame(['enrollmentId' => self::ENROLLMENT_ID, 'signature' => 'c2ln'], $seen['body']);
+    }
+
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function malformedActivationBlobs(): array
+    {
+        return [
+            'no proof' => [['enrollmentId' => self::ENROLLMENT_ID]],
+            'empty enrollmentId' => [['enrollmentId' => '', 'decryptedSecret' => 's==']],
+            'deviceId instead of enrollmentId' => [['deviceId' => 'dev-1', 'decryptedSecret' => 's==']],
+        ];
+    }
+
+    /**
+     * @dataProvider malformedActivationBlobs
+     * @param array<string, mixed> $blob
+     */
+    public function testRelayActivateMissingFieldsThrowsInvalidArgument(array $blob): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => '{}']);
         $this->expectException(\InvalidArgumentException::class);
-        $bg->relayActivate(['deviceId' => 'dev-1']); // missing decryptedSecret
+        $bg->relayActivate($blob);
     }
 
     public function testRelayActivateMissingDeviceIdInResponseThrows(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode(['status' => 'enrolled'])]);
         $this->expectException(HttpException::class);
-        $bg->relayActivate(['deviceId' => 'dev-1', 'decryptedSecret' => 's==']);
+        $bg->relayActivate(['enrollmentId' => self::ENROLLMENT_ID, 'decryptedSecret' => 's==']);
     }
 
     public function testRelayActivateOptionalFieldsDefaultToNull(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode(['deviceId' => 'dev-1'])]);
-        $result = $bg->relayActivate(['deviceId' => 'dev-1', 'decryptedSecret' => 's==']);
+        $result = $bg->relayActivate(['enrollmentId' => self::ENROLLMENT_ID, 'decryptedSecret' => 's==']);
         $this->assertSame('dev-1', $result->deviceId);
         $this->assertNull($result->status);
         $this->assertNull($result->enrolledAt);
+    }
+
+    public function testRelayActivateWrongProofIsOne401(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 401, 'body' => '{"error":"Invalid credential activation response"}']);
+        $this->expectException(InvalidSecretKeyException::class);
+        $bg->relayActivate(['enrollmentId' => self::ENROLLMENT_ID, 'decryptedSecret' => 'wrong==']);
     }
 
     // ── the primaries ──────────────────────────────────────────────────────
@@ -191,11 +273,11 @@ final class RelayTest extends TestCase
         $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
             $seen['url'] = $url;
             return ['status' => 200, 'body' => json_encode([
-                'challengeId' => 'ch_1', 'nonce' => 'n_1', 'expiresAt' => '2030-01-01T00:00:00Z',
+                'nonce' => self::NONCE, 'challenge' => self::CHALLENGE, 'expiresAt' => '2030-01-01T00:00:00Z',
             ])];
         });
         $challenge = $bg->issueChallenge('hint');
-        $this->assertSame('ch_1', $challenge->challengeId);
+        $this->assertSame(self::NONCE, $challenge->nonce);
         $this->assertStringEndsWith('/api/v1/attest/challenge', $seen['url']);
     }
 
@@ -206,7 +288,7 @@ final class RelayTest extends TestCase
             $seen['url'] = $url;
             return ['status' => 200, 'body' => json_encode(['verdict' => ['device' => ['verdict' => 'pass']]])];
         });
-        $result = $bg->verify(['quote' => '...'], challengeId: 'ch_1');
+        $result = $bg->verify(['quote' => ['quoted' => 'cQ==', 'signature' => 'cw==']], nonce: self::NONCE);
         $this->assertSame(Verdict::ALLOW, $result->verdict);
         $this->assertStringEndsWith('/api/v1/attest/verify', $seen['url']);
     }
@@ -214,10 +296,12 @@ final class RelayTest extends TestCase
     public function testPrimariesRoundTripAgainstOneTransport(): void
     {
         $bg = $this->bg(fn (string $m, string $url) => str_ends_with($url, '/challenge')
-            ? ['status' => 200, 'body' => json_encode(['challengeId' => 'ch', 'nonce' => 'n', 'expiresAt' => 'z'])]
+            ? ['status' => 200, 'body' => json_encode(['nonce' => self::NONCE, 'challenge' => self::CHALLENGE, 'expiresAt' => 'z'])]
             : ['status' => 200, 'body' => json_encode(['verdict' => ['device' => ['verdict' => 'pass']]])]);
 
-        $this->assertSame('ch', $bg->issueChallenge()->challengeId);
-        $this->assertSame(Verdict::ALLOW, $bg->verify([], challengeId: 'ch')->verdict);
+        $challenge = $bg->issueChallenge();
+        // The handle is the second segment of the string the device receives.
+        $this->assertSame($challenge->nonce, explode('.', $challenge->challenge)[1]);
+        $this->assertSame(Verdict::ALLOW, $bg->verify([], nonce: $challenge->nonce)->verdict);
     }
 }

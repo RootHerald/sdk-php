@@ -13,12 +13,15 @@ use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\UnknownPolicyException;
 
 /**
- * Server -> server backend-relay client (Client ABI 2.0).
+ * Server -> server backend-relay client (client ABI 7.0).
  *
  * The customer's keyless dumb client does only local TPM work and hands opaque
  * blobs to the customer's own backend — it holds no Root Herald key and opens no
  * socket to Root Herald. This client is the only thing that talks to Root Herald,
- * authenticated with the customer's `rh_sk_` secret key. It mirrors the four
+ * authenticated with the customer's `rh_sk_` secret key. Nothing it sends
+ * locates a row: the server resolves the tenant from the key, the challenge
+ * from the nonce the proof was made over, the enrollment from the id it
+ * minted, and the device from the proof itself. It mirrors the four
  * server-SDK helpers of `@rootherald/node`:
  *
  *   1. {@see relayEnroll}    — relay the client's enroll blob; `POST /api/v1/attest/enroll`
@@ -134,7 +137,7 @@ final class Client
      * POST /api/v1/attest/challenge — mint a challenge that carries the ask.
      * Relay {@see Challenge::$challenge} to the client verbatim; it quotes
      * over it, then submit the resulting evidence with {@see verify} using the
-     * returned challengeId.
+     * returned {@see Challenge::$nonce}.
      *
      * What the device must prove is fixed here, not at verify time. Policies
      * bind to the API key: the server resolves the policy from the key that
@@ -165,15 +168,14 @@ final class Client
             $body['keyPurpose'] = $keyPurpose;
         }
         $data = $this->post('/api/v1/attest/challenge', $body);
-        if (!isset($data['challengeId'], $data['nonce'], $data['expiresAt'])) {
-            throw new HttpException(200, json_encode($data) ?: '', 'challenge response missing challengeId/nonce/expiresAt');
+        if (
+            !is_string($data['nonce'] ?? null)
+            || !is_string($data['challenge'] ?? null)
+            || !is_string($data['expiresAt'] ?? null)
+        ) {
+            throw new HttpException(200, json_encode($data) ?: '', 'challenge response missing nonce/challenge/expiresAt');
         }
-        return new Challenge(
-            (string) $data['challengeId'],
-            (string) $data['nonce'],
-            (string) $data['expiresAt'],
-            is_string($data['challenge'] ?? null) ? $data['challenge'] : null,
-        );
+        return new Challenge($data['nonce'], $data['challenge'], $data['expiresAt']);
     }
 
     /**
@@ -190,20 +192,21 @@ final class Client
      * exists raises {@see UnknownPolicyException} (422 unknown_policy);
      * nothing is substituted.
      *
-     * @param array<string, mixed> $evidence    opaque blob from the client collector; passed through verbatim
-     * @param string               $challengeId the single-use id from issueChallenge
+     * @param array<string, mixed> $evidence opaque blob from the client collector; passed through verbatim
+     * @param string               $nonce    the challenge handle from issueChallenge; the server finds the
+     *        single-use challenge by it and checks the proof was made over it
      * @param string|null          $requestedDisclosureClass optional disclosure ceiling ("verdict"|"pseudonymous"|"derived"|"full"); omitted when null
      */
     public function verify(
         array $evidence,
-        string $challengeId,
+        string $nonce,
         ?string $requestedDisclosureClass = null,
     ): AttestResult {
-        if ($challengeId === '') {
-            throw new ChallengeException(409, '', 'verify() requires a challengeId (from issueChallenge)');
+        if ($nonce === '') {
+            throw new ChallengeException(409, '', 'verify() requires a nonce (from issueChallenge)');
         }
         $body = [
-            'challengeId' => $challengeId,
+            'nonce' => $nonce,
             'evidence' => $evidence,
         ];
         if ($requestedDisclosureClass !== null) {
@@ -256,87 +259,86 @@ final class Client
      *
      * Relays the client's `EnrollBegin()` blob to Root Herald with the `rh_sk_`
      * secret and returns the {@see EnrollChallenge} to hand back to the client's
-     * `EnrollComplete`, whose result goes to {@see relayActivate}.
+     * `EnrollComplete`, whose result goes to {@see relayActivate}. An iOS blob
+     * (`platform: "ios"`) has no activation leg: the server answers `{}` and
+     * {@see RelayEnrollResult::$challenge} is null.
      *
-     * `deviceId` is this tenant's alias for the device, not a global identifier.
+     * Nothing in the response names the device. The backend learns its alias
+     * for the device from {@see relayActivate}, or from the first verdict on
+     * iOS, and never relays it to the device.
      *
      * The client never holds the `rh_sk_` key and never talks to Root Herald;
      * this backend helper is the only thing that does.
      *
-     * Admission runs under the identity policy bound to the API key, pinned
-     * on the challenge when a live challengeId from {@see issueChallenge} is
-     * passed; a device that could never satisfy it is refused before it gets
-     * an AK ({@see AdmissionRefusedException}, 422 admission_refused).
+     * Admission runs under the identity policy bound to the API key; a device
+     * that could never satisfy it is refused before it gets an AK
+     * ({@see AdmissionRefusedException}, 422 admission_refused).
      *
-     * @param array<string, mixed> $enrollRequestBlob opaque `EnrollBegin()` blob from the client
-     *        (wire shape: ekPublicKey, akPublicArea, platform, ekCertPem?, ekCertificateChain?)
-     * @param string|null          $challengeId       sent as the `challengeId` query parameter; omitted when null
+     * @param array<string, mixed> $enrollRequestBlob opaque `EnrollBegin()` blob from the client, passed through verbatim
+     *        (wire shape: ekPublicKey, akPublicArea, platform, ekCertPem?, ekCertificateChain?, tpmSelfReport?;
+     *        on iOS: platform, iosKeyId, iosAttestationObject, nonce)
      *
-     * @throws \InvalidArgumentException if the blob lacks ekPublicKey/akPublicArea
+     * @throws \InvalidArgumentException if the blob lacks the fields its platform requires
      */
-    public function relayEnroll(array $enrollRequestBlob, ?string $challengeId = null): RelayEnrollResult
+    public function relayEnroll(array $enrollRequestBlob): RelayEnrollResult
     {
-        if (
-            !is_string($enrollRequestBlob['ekPublicKey'] ?? null)
-            || !is_string($enrollRequestBlob['akPublicArea'] ?? null)
-        ) {
-            throw new \InvalidArgumentException(
-                'relayEnroll() requires an enroll request blob with ekPublicKey and akPublicArea'
-            );
+        $ios = ($enrollRequestBlob['platform'] ?? null) === 'ios';
+        $required = $ios ? ['iosKeyId', 'iosAttestationObject', 'nonce'] : ['ekPublicKey', 'akPublicArea'];
+        foreach ($required as $field) {
+            if (!is_string($enrollRequestBlob[$field] ?? null)) {
+                throw new \InvalidArgumentException(
+                    'relayEnroll() requires an enroll request blob with ' . implode(', ', $required)
+                );
+            }
         }
 
-        $path = '/api/v1/attest/enroll';
-        if ($challengeId !== null && $challengeId !== '') {
-            $path .= '?' . http_build_query(['challengeId' => $challengeId]);
-        }
-        [$status, $respBody] = $this->rawPost($path, $enrollRequestBlob);
-
+        [$status, $respBody] = $this->rawPost('/api/v1/attest/enroll', $enrollRequestBlob);
         if ($status >= 400) {
             throw $this->mapError($status, $respBody);
         }
 
         $data = $this->decodeObject($status, $respBody);
-        if (
-            !is_string($data['deviceId'] ?? null)
-            || !is_string($data['credentialBlob'] ?? null)
-            || !is_string($data['encryptedSecret'] ?? null)
-        ) {
+        if ($ios && $data === []) {
+            return new RelayEnrollResult(null);
+        }
+        $challenge = EnrollChallenge::fromWire($data);
+        if ($challenge === null) {
             throw new HttpException(
                 $status,
                 $respBody,
-                'enroll response missing deviceId/credentialBlob/encryptedSecret'
+                'enroll response missing enrollmentId with credentialBlob/encryptedSecret or challengeNonce'
             );
         }
 
-        return RelayEnrollResult::fresh(
-            new EnrollChallenge(
-                (string) $data['deviceId'],
-                (string) $data['credentialBlob'],
-                (string) $data['encryptedSecret'],
-            ),
-            is_string($data['challengeId'] ?? null) ? $data['challengeId'] : null,
-        );
+        return new RelayEnrollResult($challenge);
     }
 
     /**
      * Enroll relay — leg 2. POST /api/v1/attest/activate.
      *
-     * Relays the client's `EnrollComplete()` blob (the decrypted credential
-     * secret) to Root Herald, completing the EK->AK credential-activation
-     * handshake, with the blob the client produced from {@see relayEnroll}'s
-     * challenge.
+     * Relays the client's `EnrollComplete()` blob to Root Herald: the decrypted
+     * credential secret (TPM) or the signature over the challenge nonce
+     * (macOS), answering the enrollment {@see relayEnroll} opened. The server
+     * refuses an unknown, spent or foreign enrollmentId and a wrong proof
+     * alike, with one 401 answer.
      *
-     * @param array<string, mixed> $activationResponse opaque `EnrollComplete()` blob from the client
-     *        (wire shape: deviceId, decryptedSecret, akPublicKey?)
+     * {@see RelayActivateResult::$deviceId} is this tenant's alias for the
+     * device, for the backend to map to its user/account. It must not be
+     * relayed to the device.
      *
-     * @throws \InvalidArgumentException if the blob lacks deviceId/decryptedSecret
+     * @param array<string, mixed> $activationResponse opaque `EnrollComplete()` blob from the client, passed through verbatim
+     *        (wire shape: enrollmentId, decryptedSecret | signature)
+     *
+     * @throws \InvalidArgumentException if the blob lacks enrollmentId, or carries neither decryptedSecret nor signature
      */
     public function relayActivate(array $activationResponse): RelayActivateResult
     {
-        $deviceId = is_string($activationResponse['deviceId'] ?? null) ? $activationResponse['deviceId'] : '';
-        if ($deviceId === '' || !is_string($activationResponse['decryptedSecret'] ?? null)) {
+        $enrollmentId = $activationResponse['enrollmentId'] ?? null;
+        $proof = is_string($activationResponse['decryptedSecret'] ?? null)
+            || is_string($activationResponse['signature'] ?? null);
+        if (!is_string($enrollmentId) || $enrollmentId === '' || !$proof) {
             throw new \InvalidArgumentException(
-                'relayActivate() requires an activation response with deviceId and decryptedSecret'
+                'relayActivate() requires an activation response with enrollmentId and decryptedSecret or signature'
             );
         }
 

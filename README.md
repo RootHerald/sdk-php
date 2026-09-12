@@ -2,12 +2,15 @@
 
 Root Herald server SDK for PHP 8.1+.
 
-**Backend relay (server → server, Client ABI 2.0)** via `Client`: your
+**Backend relay (server → server, client ABI 7.0)** via `Client`: your
 keyless dumb client does only local TPM work and hands opaque blobs to *your*
 server, which relays them to Root Herald using your `rh_sk_` secret key. The
 client never holds a key or talks to Root Herald, and never gets a verdict.
-Four helpers mirror `@rootherald/node`: `relayEnroll`, `relayActivate`,
-`issueChallenge`, `verify`.
+Nothing your server sends locates a row: Root Herald resolves the tenant from
+the key, the challenge from the nonce the proof was made over, the enrollment
+from the id it minted, and the device from the proof itself. Four helpers
+mirror `@rootherald/node`: `relayEnroll`, `relayActivate`, `issueChallenge`,
+`verify`.
 
 ```bash
 composer require rootherald/rootherald
@@ -23,17 +26,18 @@ use Rootherald\Verdict;
 // is rejected.
 $rh = new Client(secretKey: getenv('ROOTHERALD_SECRET_KEY'));
 
-// 1) Mint a challenge; relay $challenge->challenge to the client verbatim.
-//    The challenge carries the ask: what the device must prove is fixed here.
+// 1) Mint a challenge; relay $challenge->challenge to the client verbatim and
+//    keep $challenge->nonce, your handle for it. The challenge carries the
+//    ask: what the device must prove is fixed here.
 $challenge = $rh->issueChallenge(
     ask: [Client::ASK_IDENTITY, Client::ASK_POSTURE], // the default when omitted
 );
 
 // 2) The client quotes over the challenge and returns an opaque $evidence
-//    array; relay it for appraisal.
+//    array; relay it for appraisal with the nonce the proof was made over.
 $result = $rh->verify(
     evidence: $evidence,
-    challengeId: $challenge->challengeId,
+    nonce: $challenge->nonce,
 );
 
 if ($result->verdict === Verdict::ALLOW) {
@@ -69,7 +73,7 @@ $challenge = $rh->issueChallenge(
     keyPurpose: Client::KEY_PURPOSE_SIGN,
 );
 
-$result = $rh->verify(evidence: $evidence, challengeId: $challenge->challengeId);
+$result = $rh->verify(evidence: $evidence, nonce: $challenge->nonce);
 $key = $result->key();               // present only on a pass with a key ask
 store($userId, $key->keyId, $key->jwk);
 
@@ -80,23 +84,29 @@ $ok = KeySignatures::verify($key->jwk, $message, $signature);
 ### Enroll relay (one-time device bootstrap)
 
 The client's keyless enroll handshake is relayed in two legs. Every enrollment
-returns a MakeCredential challenge, a device already known included —
-re-enrollment is how a device rotates its attestation key. `deviceId` is your
-tenant's alias for the device, not a global identifier.
+returns an activation challenge, a device already known included —
+re-enrollment is how a device rotates its attestation key. The challenge
+names the enrollment, never the device: no identifier Root Herald assigns is
+relayed to the client.
 
 ```php
 // Leg 1 — relay the client's EnrollBegin() blob. Admission runs under the
 // key's identity policy; a device that could never satisfy it is refused
 // with AdmissionRefusedException (422 admission_refused).
-$enroll = $rh->relayEnroll($enrollRequestBlob, $challenge->challengeId); // challengeId optional
+$enroll = $rh->relayEnroll($enrollRequestBlob);
 
 // Hand $enroll->challenge to the client's EnrollComplete(), then…
-$client->sendToClient($enroll->challenge->toArray());
+$client->sendToClient($enroll->challenge->toArray()); // enrollmentId + credentialBlob/encryptedSecret (TPM) or challengeNonce (macOS)
 
 // Leg 2 — relay the client's EnrollComplete() blob.
-$activated = $rh->relayActivate($activationResponse); // deviceId, decryptedSecret
-// $activated->deviceId is what you map to your user/account.
+$activated = $rh->relayActivate($activationResponse); // enrollmentId + decryptedSecret (TPM) or signature (macOS)
+// $activated->deviceId is your tenant's alias for the device: map it to your
+// user/account, and never send it to the client.
 ```
+
+An iOS enrollment has one leg: `relayEnroll` returns a null `challenge`, and
+your backend learns the device's alias from its first verdict
+(`$result->device()['ueid']`).
 
 The verdict is computed by Root Herald and returned to your backend; it never
 travels through the client.
