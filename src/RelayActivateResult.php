@@ -16,7 +16,10 @@ namespace Rootherald;
 final class RelayActivateResult
 {
     public function __construct(
-        /** The enrolled device id (UUID). */
+        /**
+         * This tenant's alias for the enrolled device (UUID), not a global
+         * identifier. For the backend only; never relay it to the device.
+         */
         public readonly string $deviceId,
         /** Lifecycle status, e.g. "enrolled"; null if the server omits it. */
         public readonly ?string $status = null,

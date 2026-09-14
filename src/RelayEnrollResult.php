@@ -12,22 +12,17 @@ namespace Rootherald;
  * it would make rotation impossible. Relay {@see $challenge} to the client's
  * `EnrollComplete`, then call {@see Client::relayActivate}.
  *
- * {@see $deviceId} is THIS tenant's alias for the device, not a global
- * identifier: another tenant enrolling the same silicon is told a different one.
+ * The result carries no device identifier. The backend learns its alias for
+ * the device from activation, or from the first verdict on iOS.
  */
 final class RelayEnrollResult
 {
-    private function __construct(
-        public readonly string $deviceId,
-        public readonly EnrollChallenge $challenge,
-        /** The attestation challenge id this enrollment was admitted against, when the server echoed one. */
-        public readonly ?string $challengeId = null,
+    public function __construct(
+        /**
+         * The activation challenge to relay to the client; null for an iOS
+         * enrollment, which has no activation leg.
+         */
+        public readonly ?EnrollChallenge $challenge,
     ) {
-    }
-
-    /** The device must complete activation with $challenge. */
-    public static function fresh(EnrollChallenge $challenge, ?string $challengeId = null): self
-    {
-        return new self($challenge->deviceId, $challenge, $challengeId);
     }
 }

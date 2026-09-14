@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed
+
+- Wire 7.0: nothing the SDK sends locates a row. `Challenge` is `nonce`,
+  `challenge`, `expiresAt`; `challengeId` is gone. `Client::verify()` takes
+  `nonce`, the handle from `issueChallenge`, in place of `challengeId`; an
+  empty one raises `ChallengeException` before any request is made.
+- `Client::relayEnroll(array $blob)` takes no challenge id and sends no query
+  string. It returns `RelayEnrollResult { challenge }` only; `deviceId` and
+  `challengeId` are gone from the result. `EnrollChallenge` is `enrollmentId`
+  plus `credentialBlob` + `encryptedSecret` (TPM) or `challengeNonce`
+  (macOS); a 201 without them raises `HttpException`. An iOS blob
+  (`platform: "ios"`) needs `iosKeyId`, `iosAttestationObject` and `nonce`,
+  and its empty 201 yields a null `challenge`.
+- `Client::relayActivate()` requires `enrollmentId` and one of
+  `decryptedSecret` / `signature`; a blob keyed by `deviceId` is refused. The
+  result is unchanged: `deviceId` is the tenant alias, for the backend only.
+
 ### Removed
 
 - Policies bind to API keys. The `policy` parameter is gone from
@@ -26,10 +43,6 @@
   local ECDSA verification of device signatures over SHA-256 (P-256) or
   SHA-384 (P-384) with ext-openssl, accepting raw `r||s` and DER. Returns
   `false` for any malformed signature. `ext-openssl` is now required.
-- `Client::relayEnroll(array $blob, ?string $challengeId = null)` sends the
-  `challengeId` query parameter so admission runs under the identity policy
-  pinned on that challenge; `RelayEnrollResult::$challengeId` echoes it when
-  the server does.
 - `HttpException::$serverError` exposes the server's `error` code. A 422
   with `admission_refused` raises `AdmissionRefusedException`; other 422s
   remain `UnknownPolicyException`.
