@@ -46,7 +46,7 @@ Route::post('/attest', function () use ($rh) {
         nonce: (string) request()->input('nonce'),
     );
 
-    if ($result->verdict !== Verdict::ALLOW) {
+    if ($result->verdict !== Verdict::PASS) {
         // An un-enrolled / failing device is a verdict, not an error.
         abort(403, 'attestation denied');
     }

@@ -25,7 +25,7 @@ final class CertifiedKey
         public readonly array $jwk,
         /** What the key is certified for; echoes the challenge's keyPurpose ("sign"). */
         public readonly ?string $purpose,
-        /** base64 authPolicy digest from the key's public area; null for a key without one. */
+        /** Hex authPolicy digest from the key's public area; null for a key without one. */
         public readonly ?string $authPolicy,
         /** ISO 8601 timestamp of the certification. */
         public readonly string $certifiedAt,
