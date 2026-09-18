@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Rootherald;
 
+use Rootherald\Exceptions\ActivationRefusedException;
 use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\ChallengeException;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
 use Rootherald\Exceptions\QuotaExceededException;
+use Rootherald\Exceptions\RateLimitedException;
 use Rootherald\Exceptions\UnknownPolicyException;
 
 /**
@@ -40,18 +42,25 @@ final class Client
 {
     public const DEFAULT_BASE_URL = 'https://rootherald.io';
 
+    /** Per-request timeout in seconds, the same in every Root Herald server SDK. */
+    public const DEFAULT_TIMEOUT_SECONDS = 30.0;
+
     private const SECRET_KEY_PREFIX = 'rh_sk_';
+
+    /** Marks a 429 as the metered quota, whatever the body says. */
+    private const QUOTA_HEADER = 'x-rootherald-quota';
 
     private readonly string $baseUrl;
 
-    /** @var callable(string, string, array<string, string>, ?string): array{status: int, body: string} */
+    /** @var callable(string, string, array<string, string>, ?string): array{status: int, body: string, headers?: array<string, string>} */
     private $httpTransport;
 
     /**
      * @param string        $secretKey     your Root Herald secret key (rh_sk_…); required
      * @param string|null   $baseUrl       API base URL; defaults to production
-     * @param float         $timeoutSeconds
-     * @param callable|null $httpTransport callable(method, url, headers, body|null): {status, body}
+     * @param float         $timeoutSeconds per-request timeout; default DEFAULT_TIMEOUT_SECONDS
+     * @param callable|null $httpTransport callable(method, url, headers, body|null): {status, body, headers?};
+     *        `headers` is optional, response header names lowercased
      *
      * @throws \InvalidArgumentException if the key is empty, is not an rh_sk_ key,
      *         or the base URL is not https (loopback excepted)
@@ -59,7 +68,7 @@ final class Client
     public function __construct(
         private readonly string $secretKey,
         ?string $baseUrl = null,
-        public readonly float $timeoutSeconds = 10.0,
+        public readonly float $timeoutSeconds = self::DEFAULT_TIMEOUT_SECONDS,
         ?callable $httpTransport = null,
     ) {
         if ($secretKey === '') {
@@ -183,8 +192,9 @@ final class Client
      * server-side appraisal and return the verdict.
      *
      * An un-enrolled / failing device is NOT an error — it returns a normal
-     * AttestResult carrying Verdict::DENY/WARN. Only protocol/auth/quota
-     * problems raise an exception.
+     * AttestResult carrying Verdict::FAIL/WARN. Only protocol/auth/quota
+     * problems raise an exception; a response whose verdict token is not one
+     * of pass/warn/fail is one too (HttpException).
      *
      * The appraisal runs under the policy pinned on the challenge at mint,
      * resolved from the API key; a `policy` field in a hand-built body is
@@ -196,6 +206,8 @@ final class Client
      * @param string               $nonce    the challenge handle from issueChallenge; the server finds the
      *        single-use challenge by it and checks the proof was made over it
      * @param string|null          $requestedDisclosureClass optional disclosure ceiling ("verdict"|"pseudonymous"|"derived"|"full"); omitted when null
+     *
+     * @throws \InvalidArgumentException if the nonce is empty; no request is made
      */
     public function verify(
         array $evidence,
@@ -203,7 +215,7 @@ final class Client
         ?string $requestedDisclosureClass = null,
     ): AttestResult {
         if ($nonce === '') {
-            throw new ChallengeException(409, '', 'verify() requires a nonce (from issueChallenge)');
+            throw new \InvalidArgumentException('verify() requires a nonce (from issueChallenge)');
         }
         $body = [
             'nonce' => $nonce,
@@ -223,6 +235,14 @@ final class Client
         // etc., surfaced via AttestResult::device().
         $device = is_array($verdictData['device'] ?? null) ? $verdictData['device'] : [];
         $raw = is_string($device['verdict'] ?? null) ? $device['verdict'] : null;
+        $verdict = Verdict::fromRaw($raw);
+        if ($verdict === null) {
+            throw new HttpException(
+                200,
+                json_encode($data) ?: '',
+                'verify response verdict.device.verdict is not pass/warn/fail (got ' . json_encode($device['verdict'] ?? null) . ')'
+            );
+        }
 
         // Top-level siblings of "verdict", mirroring @rootherald/node.
         $assuranceClaimsMet = [];
@@ -235,8 +255,7 @@ final class Client
         }
         $enrollmentRequired = ($data['enrollmentRequired'] ?? null) === true;
 
-        // `key` is a top-level sibling too, present only on a passing verdict
-        // for a challenge that asked for a key.
+        // `key` is a top-level sibling too, passed through as the server sent it.
         $key = null;
         if (($data['key'] ?? null) !== null) {
             $key = CertifiedKey::fromWire($data['key']);
@@ -246,7 +265,7 @@ final class Client
         }
 
         return new AttestResult(
-            Verdict::fromRaw($raw),
+            $verdict,
             $verdictData,
             $assuranceClaimsMet,
             $enrollmentRequired,
@@ -292,9 +311,9 @@ final class Client
             }
         }
 
-        [$status, $respBody] = $this->rawPost('/api/v1/attest/enroll', $enrollRequestBlob);
+        [$status, $respBody, $respHeaders] = $this->rawPost('/api/v1/attest/enroll', $enrollRequestBlob);
         if ($status >= 400) {
-            throw $this->mapError($status, $respBody);
+            throw $this->mapError($status, $respBody, $respHeaders);
         }
 
         $data = $this->decodeObject($status, $respBody);
@@ -361,9 +380,9 @@ final class Client
      */
     private function post(string $path, array $body): array
     {
-        [$status, $respBody] = $this->rawPost($path, $body);
+        [$status, $respBody, $respHeaders] = $this->rawPost($path, $body);
         if ($status >= 400) {
-            throw $this->mapError($status, $respBody);
+            throw $this->mapError($status, $respBody, $respHeaders);
         }
         if ($respBody === '' || $status === 204) {
             return [];
@@ -372,11 +391,12 @@ final class Client
     }
 
     /**
-     * Issue an authenticated JSON POST and return the raw status + body, leaving
-     * status interpretation to the caller. $path may carry a query string.
+     * Issue an authenticated JSON POST and return the raw status, body and
+     * response headers (names lowercased), leaving status interpretation to
+     * the caller. $path may carry a query string.
      *
      * @param array<string, mixed> $body
-     * @return array{0: int, 1: string} [status, body]
+     * @return array{0: int, 1: string, 2: array<string, string>} [status, body, headers]
      */
     private function rawPost(string $path, array $body): array
     {
@@ -390,7 +410,14 @@ final class Client
 
         $resp = ($this->httpTransport)('POST', $url, $headers, $rawBody);
 
-        return [(int) $resp['status'], (string) $resp['body']];
+        $respHeaders = [];
+        foreach (is_array($resp['headers'] ?? null) ? $resp['headers'] : [] as $name => $value) {
+            if (is_string($name) && is_string($value)) {
+                $respHeaders[strtolower($name)] = $value;
+            }
+        }
+
+        return [(int) $resp['status'], (string) $resp['body'], $respHeaders];
     }
 
     /**
@@ -410,15 +437,18 @@ final class Client
     }
 
     /**
-     * Map a non-2xx status to the matching typed exception, mirroring
-     * @rootherald/node. A 422 is split on the server's "error" code:
-     * admission_refused gets its own class; anything else is the
-     * policy-resolution failure.
+     * Map a non-2xx response to the matching typed exception, mirroring
+     * @rootherald/node. Where one status carries two refusals the server's
+     * "error" code (or a header) tells them apart; a code no class covers
+     * stays a plain HttpException with $serverError preserved.
+     *
+     * @param array<string, string> $headers response headers, names lowercased
      */
-    private function mapError(int $status, string $body): HttpException
+    private function mapError(int $status, string $body, array $headers = []): HttpException
     {
         $message = null;
         $code = null;
+        $retryAfter = null;
         $parsed = json_decode($body, true);
         if (is_array($parsed)) {
             foreach (['message', 'detail', 'error_description'] as $field) {
@@ -429,19 +459,27 @@ final class Client
             }
             $code = (is_string($parsed['error'] ?? null) ? $parsed['error'] : null)
                 ?? (is_string($parsed['code'] ?? null) ? $parsed['code'] : null);
+            if (is_int($parsed['retryAfterSeconds'] ?? null)) {
+                $retryAfter = $parsed['retryAfterSeconds'];
+            }
+        }
+        if (is_numeric(trim($headers['retry-after'] ?? ''))) {
+            $retryAfter = (int) trim($headers['retry-after']);
         }
         return match (true) {
+            $status === 401 && $code === 'activation_refused' => new ActivationRefusedException($status, $body, $message, $code),
             $status === 401 => new InvalidSecretKeyException($status, $body, $message, $code),
             $status === 422 && $code === 'admission_refused' => new AdmissionRefusedException($status, $body, $message, $code),
-            $status === 422 => new UnknownPolicyException($status, $body, $message, $code),
+            $status === 422 && ($code === null || $code === 'unknown_policy') => new UnknownPolicyException($status, $body, $message, $code),
             $status === 409 => new ChallengeException($status, $body, $message, $code),
             $status === 400 => new InvalidEvidenceException($status, $body, $message, $code),
-            $status === 429 => new QuotaExceededException($status, $body, $message, $code),
+            $status === 429 && ($code === 'quota_exceeded' || isset($headers[self::QUOTA_HEADER])) => new QuotaExceededException($status, $body, $message, $code),
+            $status === 429 => new RateLimitedException($status, $body, $message, $code, $retryAfter),
             default => new HttpException($status, $body, $message, $code),
         };
     }
 
-    /** @return callable(string, string, array<string, string>, ?string): array{status: int, body: string} */
+    /** @return callable(string, string, array<string, string>, ?string): array{status: int, body: string, headers: array<string, string>} */
     private function defaultTransport(): callable
     {
         return function (string $method, string $url, array $headers, ?string $body): array {
@@ -450,11 +488,19 @@ final class Client
             foreach ($headers as $k => $v) {
                 $headerLines[] = "{$k}: {$v}";
             }
+            $respHeaders = [];
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_CUSTOMREQUEST => $method,
                 CURLOPT_HTTPHEADER => $headerLines,
                 CURLOPT_TIMEOUT => (int) ceil($this->timeoutSeconds),
+                CURLOPT_HEADERFUNCTION => function ($ch, string $line) use (&$respHeaders): int {
+                    $parts = explode(':', $line, 2);
+                    if (count($parts) === 2) {
+                        $respHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+                    }
+                    return strlen($line);
+                },
             ]);
             if ($body !== null) {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
@@ -466,7 +512,7 @@ final class Client
             if ($respBody === false) {
                 throw new HttpException(0, '', "curl error: {$err}");
             }
-            return ['status' => (int) $status, 'body' => (string) $respBody];
+            return ['status' => (int) $status, 'body' => (string) $respBody, 'headers' => $respHeaders];
         };
     }
 }

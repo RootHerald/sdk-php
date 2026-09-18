@@ -9,6 +9,7 @@ use Rootherald\Client;
 use Rootherald\EnrollChallenge;
 use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\HttpException;
+use Rootherald\Exceptions\ActivationRefusedException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
 use Rootherald\RelayActivateResult;
 use Rootherald\RelayEnrollResult;
@@ -258,11 +259,18 @@ final class RelayTest extends TestCase
         $this->assertNull($result->enrolledAt);
     }
 
-    public function testRelayActivateWrongProofIsOne401(): void
+    public function testRelayActivateWrongProofIsOne401ActivationRefusal(): void
     {
-        $bg = $this->bg(fn () => ['status' => 401, 'body' => '{"error":"Invalid credential activation response"}']);
-        $this->expectException(InvalidSecretKeyException::class);
+        $bg = $this->bg(fn () => ['status' => 401, 'body' => '{"error":"activation_refused","message":"Invalid credential activation response"}']);
+        $this->expectException(ActivationRefusedException::class);
         $bg->relayActivate(['enrollmentId' => self::ENROLLMENT_ID, 'decryptedSecret' => 'wrong==']);
+    }
+
+    public function testRelayActivateWithABadKeyIsStillAnInvalidKey(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 401, 'body' => '{"error":"invalid_secret_key"}']);
+        $this->expectException(InvalidSecretKeyException::class);
+        $bg->relayActivate(['enrollmentId' => self::ENROLLMENT_ID, 'decryptedSecret' => 's==']);
     }
 
     // ── the primaries ──────────────────────────────────────────────────────
@@ -289,7 +297,7 @@ final class RelayTest extends TestCase
             return ['status' => 200, 'body' => json_encode(['verdict' => ['device' => ['verdict' => 'pass']]])];
         });
         $result = $bg->verify(['quote' => ['quoted' => 'cQ==', 'signature' => 'cw==']], nonce: self::NONCE);
-        $this->assertSame(Verdict::ALLOW, $result->verdict);
+        $this->assertSame(Verdict::PASS, $result->verdict);
         $this->assertStringEndsWith('/api/v1/attest/verify', $seen['url']);
     }
 
@@ -302,6 +310,6 @@ final class RelayTest extends TestCase
         $challenge = $bg->issueChallenge();
         // The handle is the second segment of the string the device receives.
         $this->assertSame($challenge->nonce, explode('.', $challenge->challenge)[1]);
-        $this->assertSame(Verdict::ALLOW, $bg->verify([], nonce: $challenge->nonce)->verdict);
+        $this->assertSame(Verdict::PASS, $bg->verify([], nonce: $challenge->nonce)->verdict);
     }
 }

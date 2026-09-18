@@ -17,7 +17,8 @@ final class AttestResult
      * @param bool                 $enrollmentRequired the attest-first / enroll-on-miss signal
      *        (top-level `enrollmentRequired`): the device must (re-)enroll before it can pass
      * @param CertifiedKey|null    $key                the key the appraisal certified (top-level
-     *        `key`); present only on a passing verdict for a challenge that asked for "key"
+     *        `key`), passed through as the server sent it; the server sends one only on a
+     *        passing verdict for a challenge that asked for "key"
      */
     public function __construct(
         public readonly Verdict $verdict,

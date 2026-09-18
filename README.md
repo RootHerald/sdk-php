@@ -40,7 +40,7 @@ $result = $rh->verify(
     nonce: $challenge->nonce,
 );
 
-if ($result->verdict === Verdict::ALLOW) {
+if ($result->verdict === Verdict::PASS) {
     // proceed
 }
 ```
@@ -52,12 +52,42 @@ pinned on the challenge when it is minted. Change what a key enforces from the
 dashboard or `PUT /api/v1/admin/api-keys/{id}/policies`; a `policy` field in a
 hand-built request body is refused with `400 policy_bound_to_key`.
 
-An un-enrolled / failing device is a verdict (`Verdict::DENY`/`WARN`), **not**
-an exception. Only protocol/auth/quota problems throw: `InvalidSecretKeyException`
-(401), `UnknownPolicyException` / `AdmissionRefusedException` (422, told
-apart by `$serverError`),
-`ChallengeException` (409), `InvalidEvidenceException` (400),
-`QuotaExceededException` (429).
+`$result->verdict` is the server's own token, `Verdict::PASS` / `Verdict::WARN`
+/ `Verdict::FAIL` (`"pass"` / `"warn"` / `"fail"`, the same vocabulary in every
+Root Herald SDK). A response carrying any other token is refused with
+`HttpException`, never a guessed verdict.
+
+### Errors
+
+An un-enrolled / failing device is a verdict (`Verdict::FAIL`/`WARN`), **not**
+an exception. Only protocol, auth and quota problems throw, each exposing
+`$status` and the server's `$serverError`:
+
+| Status | Server `error` code                                 | Exception                    |
+| ------ | --------------------------------------------------- | ---------------------------- |
+| 401    | `activation_refused`                                | `ActivationRefusedException` |
+| 401    | anything else                                       | `InvalidSecretKeyException`  |
+| 400    |                                                     | `InvalidEvidenceException`   |
+| 409    |                                                     | `ChallengeException`         |
+| 422    | `unknown_policy`, or none                           | `UnknownPolicyException`     |
+| 422    | `admission_refused`                                 | `AdmissionRefusedException`  |
+| 429    | `quota_exceeded`, or an `X-RootHerald-Quota` header | `QuotaExceededException`     |
+| 429    | anything else                                       | `RateLimitedException`       |
+
+`ActivationRefusedException` is `relayActivate` being refused for an unknown,
+spent or foreign `enrollmentId` or a wrong proof; the secret key was accepted.
+`RateLimitedException::$retryAfterSeconds` is the server's `Retry-After` (else
+the body's `retryAfterSeconds`, else null); `QuotaExceededException` is the
+metered billing ceiling. Any other status, and a 422 or 402 carrying a code no
+class covers (`posture_not_bound`, `plan_lapsed`), is a plain `HttpException`
+with `$serverError` preserved. Input the SDK refuses locally, such as an empty
+nonce, is `\InvalidArgumentException` and makes no request.
+
+Every request times out after 30 s (`Client::DEFAULT_TIMEOUT_SECONDS`, the
+`timeoutSeconds` constructor argument). The default is the same in every Root
+Herald server SDK. A custom `httpTransport` may return a `headers` array
+(response header names lowercased) so the 429 split can read `Retry-After` and
+`X-RootHerald-Quota`; the built-in curl transport does.
 
 ### Certified device key
 

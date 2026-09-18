@@ -5,40 +5,28 @@ declare(strict_types=1);
 namespace Rootherald;
 
 /**
- * Friendly tri-state verdict mapped from the EAR status carried in the
- * attestation token.
+ * The verdict values the server emits at verdict.device.verdict, as
+ * {@see AttestResult::$verdict} returns them. The same vocabulary in every
+ * Root Herald SDK; a response carrying any other token is refused.
  *
- *  - ALLOW: device attestation affirming, no concerns; allow the action.
- *  - WARN:  warnings present (reduced assurance / partial fail);
- *           allow with care.
- *  - DENY:  contraindicated — refuse the action.
+ *  - PASS: the device satisfied the policy.
+ *  - WARN: the device passed with reduced assurance; the policy says whether
+ *          to proceed.
+ *  - FAIL: the device did not satisfy the policy, or is not enrolled (see
+ *          {@see AttestResult::$enrollmentRequired}).
  */
 enum Verdict: string
 {
-    case ALLOW = 'allow';
+    case PASS = 'pass';
     case WARN = 'warn';
-    case DENY = 'deny';
-
-    public static function fromEarStatus(?string $earStatus): self
-    {
-        return match ($earStatus) {
-            'affirming' => self::ALLOW,
-            'contraindicated' => self::DENY,
-            default => self::WARN,
-        };
-    }
+    case FAIL = 'fail';
 
     /**
-     * Map the device `verdict` field the verify endpoint emits at
-     * verdict.device.verdict ("pass"/"fail"/"warn") to the SDK enum.
-     * Unknown/missing values map to WARN (fail-closed: never silently ALLOW).
+     * Read the verdict.device.verdict token. Anything outside the three
+     * values the server emits is null, never a guessed verdict.
      */
-    public static function fromRaw(?string $raw): self
+    public static function fromRaw(?string $raw): ?self
     {
-        return match (strtolower(trim((string) $raw))) {
-            'pass', 'allow', 'affirming' => self::ALLOW,
-            'fail', 'deny', 'contraindicated' => self::DENY,
-            default => self::WARN,
-        };
+        return self::tryFrom(strtolower(trim((string) $raw)));
     }
 }
