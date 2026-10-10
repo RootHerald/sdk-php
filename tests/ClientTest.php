@@ -219,6 +219,18 @@ final class ClientTest extends TestCase
         }
     }
 
+    public function testAnInvalidPurposeIsAProgrammingErrorNotADeviceFailure(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 400, 'body' => '{"error":"invalid_purpose","message":"purpose must be one of sign, decrypt"}']);
+        try {
+            $bg->issueKeyChallenge(Client::PURPOSE_SIGN);
+            $this->fail('expected InvalidAskException');
+        } catch (InvalidAskException $e) {
+            $this->assertNotInstanceOf(InvalidEvidenceException::class, $e);
+            $this->assertSame('invalid_purpose', $e->serverError);
+        }
+    }
+
     public function testAnUnknownExpectedValueStaysAGenericHttpException(): void
     {
         $bg = $this->bg(fn () => ['status' => 422, 'body' => '{"error":"expected_unknown","message":"no such device"}']);
@@ -823,6 +835,11 @@ final class ClientTest extends TestCase
             '400 wire_version_unsupported' => [400, 'wire_version_unsupported', InvalidEvidenceException::class],
             '400 invalid_enroll_shape' => [400, 'invalid_enroll_shape', InvalidEvidenceException::class],
             '400 invalid_ask' => [400, 'invalid_ask', InvalidAskException::class],
+            '400 invalid_purpose' => [400, 'invalid_purpose', InvalidAskException::class],
+            '400 invalid_certification' => [400, 'invalid_certification', InvalidEvidenceException::class],
+            '409 challenge_expired_or_used' => [409, 'challenge_expired_or_used', ChallengeException::class],
+            '422 purpose_unsupported' => [422, 'purpose_unsupported', HttpException::class],
+            '422 certification_rejected' => [422, 'certification_rejected', HttpException::class],
             '429 budget_exhausted' => [429, 'budget_exhausted', QuotaExceededException::class],
             '429 rate_limited' => [429, 'rate_limited', RateLimitedException::class],
         ];

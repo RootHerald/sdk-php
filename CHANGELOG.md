@@ -47,7 +47,10 @@ reverse; the server refuses a 7.0-shaped enroll body with
 - A 429 `budget_exhausted` is `QuotaExceededException` with `$budget`
   (`['id', 'name']`); its `errorCode` is `budget_exhausted` and the
   `quota_exceeded` code is gone. A 409 `key_rotation_conflict` is a plain
-  `HttpException`, not `ChallengeException`.
+  `HttpException`, not `ChallengeException`. A 400 `invalid_purpose` is
+  `InvalidAskException` (`$serverError` carries the code); a 400
+  `invalid_certification` is `InvalidEvidenceException`; a 422
+  `purpose_unsupported` or `certification_rejected` is a plain `HttpException`.
 
 ### Migration
 

@@ -719,7 +719,7 @@ final class Client
             $status === 422 && $code === 'admission_refused' => new AdmissionRefusedException($status, $body, $message, $code),
             $status === 422 && ($code === null || $code === 'unknown_policy') => new UnknownPolicyException($status, $body, $message, $code),
             $status === 409 && $code !== 'key_rotation_conflict' => new ChallengeException($status, $body, $message, $code),
-            $status === 400 && $code === 'invalid_ask' => new InvalidAskException($status, $body, $message, $code),
+            $status === 400 && ($code === 'invalid_ask' || $code === 'invalid_purpose') => new InvalidAskException($status, $body, $message, $code),
             $status === 400 => new InvalidEvidenceException($status, $body, $message, $code),
             $status === 429 && ($code === 'budget_exhausted' || isset($headers[self::QUOTA_HEADER])) => new QuotaExceededException($status, $body, $message, $code, $budget),
             $status === 429 => new RateLimitedException($status, $body, $message, $code, $retryAfter),

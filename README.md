@@ -202,13 +202,13 @@ an exception. Only protocol, auth and budget problems throw, each exposing
 | ------ | ----------------------------------------------------- | ---------------------------- |
 | 401    | `activation_refused`                                  | `ActivationRefusedException` |
 | 401    | anything else                                         | `InvalidSecretKeyException`  |
-| 400    | `invalid_ask`                                         | `InvalidAskException`        |
-| 400    | anything else, including `wire_version_unsupported`, `invalid_enroll_shape` | `InvalidEvidenceException` |
+| 400    | `invalid_ask`, `invalid_purpose`                      | `InvalidAskException`        |
+| 400    | anything else, including `wire_version_unsupported`, `invalid_enroll_shape`, `invalid_certification` | `InvalidEvidenceException` |
 | 409    | `key_rotation_conflict`                               | `HttpException`              |
-| 409    | anything else                                         | `ChallengeException`         |
+| 409    | anything else, including `challenge_expired_or_used`  | `ChallengeException`         |
 | 422    | `unknown_policy`, or none                             | `UnknownPolicyException`     |
 | 422    | `admission_refused`                                   | `AdmissionRefusedException`  |
-| 422    | `expected_unknown`, `key_disclosure_too_low`          | `HttpException`              |
+| 422    | `expected_unknown`, `key_disclosure_too_low`, `purpose_unsupported`, `certification_rejected` | `HttpException` |
 | 429    | `budget_exhausted`, or an `X-RootHerald-Quota` header | `QuotaExceededException`     |
 | 429    | anything else                                         | `RateLimitedException`       |
 
