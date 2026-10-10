@@ -16,35 +16,28 @@ final class AttestResult
      *        (top-level `assuranceClaimsMet`), mirroring `@rootherald/node`
      * @param bool                 $enrollmentRequired the attest-first / enroll-on-miss signal
      *        (top-level `enrollmentRequired`): the device must (re-)enroll before it can pass
-     * @param CertifiedKey|null    $key                the key the appraisal certified (top-level
-     *        `key`), passed through as the server sent it; the server sends one only on a
-     *        passing verdict for a challenge that asked for "key"
      */
     public function __construct(
         public readonly Verdict $verdict,
         public readonly array $verdictData,
         public readonly array $assuranceClaimsMet = [],
         public readonly bool $enrollmentRequired = false,
-        private readonly ?CertifiedKey $key = null,
     ) {
     }
 
     /**
-     * The TPM-resident signing key the appraisal certified, or null. Present
-     * only on a passing verdict for a challenge issued with "key" in its ask.
-     */
-    public function key(): ?CertifiedKey
-    {
-        return $this->key;
-    }
-
-    /**
-     * The raw `device` sub-object of the verdict, passed through verbatim.
+     * The raw `device` sub-object of the verdict, passed through verbatim:
+     * ueid, disclosureClass, earStatus, verdict, attestationType, attestedAt,
+     * quoteVerified, secureBootVerified, eventLogVerified, postureEvaluated,
+     * platform, tpmKind, hardwareGenuine, sybilResistance, returningDevice,
+     * bootChanged, bootChangedStages, trustworthinessVector, and whatever
+     * else the server sends. Fields gated by disclosure class are absent
+     * below it.
      *
-     * In addition to the per-device appraisal, when a quote-bound event log was
-     * supplied the server populates ADDITIVE, advisory-only cohort fields here
-     * (camelCase keys; absent otherwise) — never a trust gate. See the cohort*()
-     * / novelProfile() accessors below.
+     * When a quote-bound event log was supplied the server also populates
+     * ADDITIVE, advisory-only cohort fields here (camelCase keys; absent
+     * otherwise) — never a trust gate. See the cohort*() / novelProfile()
+     * accessors below.
      *
      * @return array<string, mixed>
      */
@@ -53,6 +46,39 @@ final class AttestResult
         $device = $this->verdictData['device'] ?? null;
 
         return is_array($device) ? $device : [];
+    }
+
+    /** This tenant's alias for the device (`verdict.device.ueid`), or null below pseudonymous. */
+    public function deviceId(): ?string
+    {
+        $v = $this->device()['ueid'] ?? null;
+
+        return is_string($v) && $v !== '' ? $v : null;
+    }
+
+    /**
+     * The binding the challenge named, echoed by the server after it was
+     * enforced: `['key' => keyId]`, `['devices' => [alias, ...]]`, or both.
+     * Null when the challenge named nothing. {@see Client::verify} compares
+     * it with what the caller asked for.
+     *
+     * @return array{key?: string, devices?: list<string>}|null
+     */
+    public function expected(): ?array
+    {
+        $v = $this->verdictData['expected'] ?? null;
+        if (!is_array($v)) {
+            return null;
+        }
+        $out = [];
+        if (is_string($v['key'] ?? null)) {
+            $out['key'] = $v['key'];
+        }
+        if (is_array($v['devices'] ?? null)) {
+            $out['devices'] = array_values(array_filter($v['devices'], 'is_string'));
+        }
+
+        return $out;
     }
 
     /** Opaque cohort key, or null if the server did not return one. */

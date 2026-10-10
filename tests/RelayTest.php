@@ -10,6 +10,7 @@ use Rootherald\EnrollChallenge;
 use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\HttpException;
 use Rootherald\Exceptions\ActivationRefusedException;
+use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
 use Rootherald\RelayActivateResult;
 use Rootherald\RelayEnrollResult;
@@ -34,6 +35,23 @@ final class RelayTest extends TestCase
         );
     }
 
+    /** @return array<string, mixed> */
+    private static function tpmBlob(string $platform = 'windows'): array
+    {
+        return [
+            'ekPublicKey' => 'ekpub==',
+            'attestationKey' => [
+                'publicArea' => 'akpub==',
+                'parentPublicArea' => 'srk==',
+                'qualifiedName' => 'qn==',
+            ],
+            'platform' => $platform,
+            'ekCertPem' => '-----BEGIN CERTIFICATE-----',
+            'ekCertificateChain' => ['-----BEGIN CERTIFICATE-----'],
+            'tpmSelfReport' => ['manufacturer' => 'INTC', 'vendorString' => 'Intel'],
+        ];
+    }
+
     // ── relayEnroll ────────────────────────────────────────────────────────
 
     public function testRelayEnrollTpm201ReturnsMakeCredentialChallenge(): void
@@ -42,6 +60,7 @@ final class RelayTest extends TestCase
         $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
             $seen['url'] = $url;
             $seen['auth'] = $headers['Authorization'] ?? null;
+            $seen['raw'] = $body;
             $seen['body'] = json_decode((string) $body, true);
             return ['status' => 201, 'body' => json_encode([
                 'enrollmentId' => self::ENROLLMENT_ID,
@@ -50,13 +69,7 @@ final class RelayTest extends TestCase
             ])];
         });
 
-        $blob = [
-            'ekPublicKey' => 'ekpub==',
-            'akPublicArea' => 'akpub==',
-            'platform' => 'windows',
-            'ekCertPem' => '-----BEGIN CERTIFICATE-----',
-            'tpmSelfReport' => ['manufacturer' => 'INTC', 'vendorString' => 'Intel'],
-        ];
+        $blob = self::tpmBlob() + ['futureField' => ['nested' => true]];
         $result = $bg->relayEnroll($blob);
 
         $this->assertInstanceOf(RelayEnrollResult::class, $result);
@@ -69,7 +82,9 @@ final class RelayTest extends TestCase
         $this->assertStringEndsWith('/api/v1/attest/enroll', $seen['url']);
         $this->assertStringNotContainsString('?', $seen['url']);
         $this->assertSame('Bearer rh_sk_test_xxx', $seen['auth']);
+        // relayed verbatim: the nested AK, the unknown field, nothing added
         $this->assertSame($blob, $seen['body']);
+        $this->assertSame(json_encode($blob), $seen['raw']);
         // the challenge round-trips to exactly the 201 body the client consumes
         $this->assertSame(
             ['enrollmentId' => self::ENROLLMENT_ID, 'credentialBlob' => 'cred==', 'encryptedSecret' => 'enc=='],
@@ -77,15 +92,29 @@ final class RelayTest extends TestCase
         );
     }
 
-    public function testRelayEnrollMacos201ReturnsChallengeNonce(): void
+    public function testRelayEnrollAcceptsLinux(): void
     {
         $bg = $this->bg(fn () => ['status' => 201, 'body' => json_encode([
-            'enrollmentId' => self::ENROLLMENT_ID,
-            'challengeNonce' => 'bm9uY2U=',
+            'enrollmentId' => self::ENROLLMENT_ID, 'credentialBlob' => 'cred==', 'encryptedSecret' => 'enc==',
         ])]);
+        $this->assertSame(self::ENROLLMENT_ID, $bg->relayEnroll(self::tpmBlob('linux'))->challenge?->enrollmentId);
+    }
 
-        $result = $bg->relayEnroll(['ekPublicKey' => 'BJ4=', 'akPublicArea' => 'BJ4=', 'platform' => 'macos']);
+    public function testRelayEnrollMacos201ReturnsChallengeNonce(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $m, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 201, 'body' => json_encode([
+                'enrollmentId' => self::ENROLLMENT_ID,
+                'challengeNonce' => 'bm9uY2U=',
+            ])];
+        });
 
+        $blob = ['ekPublicKey' => 'BJ4=', 'akPublicArea' => 'BJ4=', 'platform' => 'macos'];
+        $result = $bg->relayEnroll($blob);
+
+        $this->assertSame($blob, $seen['body']);
         $this->assertSame(self::ENROLLMENT_ID, $result->challenge?->enrollmentId);
         $this->assertSame('bm9uY2U=', $result->challenge?->challengeNonce);
         $this->assertNull($result->challenge?->credentialBlob);
@@ -115,11 +144,46 @@ final class RelayTest extends TestCase
         $this->assertSame($blob, $seen['body']);
     }
 
-    public function testRelayEnrollIosBlobMustCarryItsOwnFields(): void
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function malformedEnrollBlobs(): array
     {
-        $bg = $this->bg(fn () => ['status' => 201, 'body' => '{}']);
-        $this->expectException(\InvalidArgumentException::class);
-        $bg->relayEnroll(['platform' => 'ios', 'iosKeyId' => 'a2V5', 'iosAttestationObject' => 'Y2Jvcg==']); // missing nonce
+        $tpm = self::tpmBlob();
+
+        return [
+            'flat 7.0 TPM body' => [['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==', 'platform' => 'windows']],
+            'flat 7.0 TPM body on linux' => [['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==', 'platform' => 'linux']],
+            'nested AK beside a flat one' => [['akPublicArea' => 'ak=='] + $tpm],
+            'no platform' => [array_diff_key($tpm, ['platform' => 1])],
+            'unknown platform' => [['platform' => 'android'] + $tpm],
+            'no ekPublicKey' => [array_diff_key($tpm, ['ekPublicKey' => 1])],
+            'attestationKey missing parent' => [['attestationKey' => ['publicArea' => 'ak==', 'qualifiedName' => 'qn==']] + $tpm],
+            'attestationKey missing qualifiedName' => [['attestationKey' => ['publicArea' => 'ak==', 'parentPublicArea' => 'p==']] + $tpm],
+            'attestationKey as a string' => [['attestationKey' => 'ak=='] + $tpm],
+            'macos with a nested AK' => [['ekPublicKey' => 'BJ4=', 'akPublicArea' => 'BJ4=', 'platform' => 'macos', 'attestationKey' => $tpm['attestationKey']]],
+            'macos missing akPublicArea' => [['ekPublicKey' => 'BJ4=', 'platform' => 'macos']],
+            'ios missing nonce' => [['platform' => 'ios', 'iosKeyId' => 'a2V5', 'iosAttestationObject' => 'Y2Jvcg==']],
+            'empty' => [[]],
+        ];
+    }
+
+    /**
+     * @dataProvider malformedEnrollBlobs
+     * @param array<string, mixed> $blob
+     */
+    public function testRelayEnrollRefusesAMalformedBlobBeforeCallingOut(array $blob): void
+    {
+        $called = false;
+        $bg = $this->bg(function () use (&$called): array {
+            $called = true;
+            return ['status' => 201, 'body' => '{}'];
+        });
+        try {
+            $bg->relayEnroll($blob);
+            $this->fail('expected InvalidArgumentException');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('attestationKey', $e->getMessage());
+        }
+        $this->assertFalse($called);
     }
 
     public function testRelayEnrollMaps422AdmissionRefused(): void
@@ -128,7 +192,7 @@ final class RelayTest extends TestCase
             'error' => 'admission_refused', 'detail' => 'firmware TPM under a discrete-only policy',
         ])]);
         try {
-            $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
+            $bg->relayEnroll(self::tpmBlob());
             $this->fail('expected AdmissionRefusedException');
         } catch (AdmissionRefusedException $e) {
             $this->assertSame('admission_refused', $e->errorCode);
@@ -137,11 +201,17 @@ final class RelayTest extends TestCase
         }
     }
 
-    public function testRelayEnrollMissingFieldsThrowsInvalidArgument(): void
+    public function testRelayEnrollMapsTheServersShapeRefusals(): void
     {
-        $bg = $this->bg(fn () => ['status' => 201, 'body' => '{}']);
-        $this->expectException(\InvalidArgumentException::class);
-        $bg->relayEnroll(['ekPublicKey' => 'ek==']); // missing akPublicArea
+        foreach (['wire_version_unsupported', 'invalid_enroll_shape'] as $code) {
+            $bg = $this->bg(fn () => ['status' => 400, 'body' => json_encode(['error' => $code])]);
+            try {
+                $bg->relayEnroll(self::tpmBlob());
+                $this->fail("expected InvalidEvidenceException for {$code}");
+            } catch (InvalidEvidenceException $e) {
+                $this->assertSame($code, $e->serverError);
+            }
+        }
     }
 
     /** @return array<string, array{array<string, mixed>}> */
@@ -166,14 +236,14 @@ final class RelayTest extends TestCase
     {
         $bg = $this->bg(fn () => ['status' => 201, 'body' => json_encode($body)]);
         $this->expectException(HttpException::class);
-        $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
+        $bg->relayEnroll(self::tpmBlob());
     }
 
     public function testRelayEnrollAuthErrorIsMapped(): void
     {
         $bg = $this->bg(fn () => ['status' => 401, 'body' => '{"error":"x","message":"bad key"}']);
         $this->expectException(InvalidSecretKeyException::class);
-        $bg->relayEnroll(['ekPublicKey' => 'ek==', 'akPublicArea' => 'ak==']);
+        $bg->relayEnroll(self::tpmBlob());
     }
 
     // ── relayActivate ──────────────────────────────────────────────────────
@@ -284,7 +354,7 @@ final class RelayTest extends TestCase
                 'nonce' => self::NONCE, 'challenge' => self::CHALLENGE, 'expiresAt' => '2030-01-01T00:00:00Z',
             ])];
         });
-        $challenge = $bg->issueChallenge('hint');
+        $challenge = $bg->issueChallenge(ask: [Client::ASK_IDENTITY]);
         $this->assertSame(self::NONCE, $challenge->nonce);
         $this->assertStringEndsWith('/api/v1/attest/challenge', $seen['url']);
     }

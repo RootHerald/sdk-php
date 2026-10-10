@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+Wire 8.0. Every installation of a client has its own attestation key, created
+inside the TPM at enrollment and handed back as an opaque AK blob the client
+keeps and passes to every attest and mint. Keys are minted in their own
+ceremony. A backend on this version cannot drive a 7.0 client, and the
+reverse; the server refuses a 7.0-shaped enroll body with
+`400 wire_version_unsupported`.
+
+### Breaking
+
+- `Client::relayEnroll()` takes the 8.0 TPM body `{ ekPublicKey,
+  attestationKey: { publicArea, parentPublicArea, qualifiedName }, platform,
+  … }` and refuses a flat `akPublicArea` TPM body, a missing or unknown
+  `platform`, locally with `\InvalidArgumentException`. The macOS body stays
+  flat and the iOS body is unchanged; every body is relayed verbatim, unknown
+  fields included.
+- Keys are minted by `Client::issueKeyChallenge(string $purpose, ?array
+  $expectedDevices = null): KeyChallenge` (`Client::PURPOSE_SIGN` /
+  `PURPOSE_DECRYPT`) and `Client::certifyKey(array $certification, string
+  $nonce): CertifiedKey`. `Client::ASK_KEY`, `Client::KEY_PURPOSE_SIGN`, the
+  `keyPurpose` parameter and `AttestResult::key()` are removed; a challenge
+  that still asks for `"key"` raises `InvalidAskException` (400
+  `invalid_ask`).
+- `Client::issueChallenge(?array $ask = null, ?string $expectedKey = null,
+  ?array $expectedDevices = null)` no longer takes `deviceHint`. The
+  parameter is gone outright, not kept as an ignored slot: each 7.0
+  positional value (`deviceHint` string, `keyPurpose` string in the third
+  slot) now meets a parameter of another type and fails with `TypeError`
+  before any request, so a stray `'sign'` can never land in `expectedKey`.
+  Call it with named arguments.
+- `Client::verify()` takes `expectedKey` and `expectedDevices` after
+  `requestedDisclosureClass`. Pass the values the challenge was issued with:
+  a verdict that does not echo them under `expected` is refused with
+  `ExpectedNotEnforcedException`. `AttestResult::expected()` returns the
+  echo; `AttestResult::deviceId()` returns `verdict.device.ueid`.
+- `CertifiedKey` is `deviceId`, `keyId`, `purpose`, `alg` (`ES256` /
+  `RS256` / `ECDH-ES` / `RSA-OAEP-256`), `jwk` (EC P-256 or RSA),
+  `hardwareBound`, `certifiedAt`, `format` (decrypt keys only).
+  `authPolicy` is gone. A JWK whose family does not fit `alg` is refused.
+- `KeySignatures::verify()` accepts an RSA JWK (`kty` RSA, `n`, `e`) as RS256
+  (PKCS#1 v1.5 over SHA-256, modulus at least 2048 bits, signature exactly
+  the modulus length) beside EC P-256 as ES256. P-384 is no longer accepted:
+  no device certifies one.
+- A 429 `budget_exhausted` is `QuotaExceededException` with `$budget`
+  (`['id', 'name']`); its `errorCode` is `budget_exhausted` and the
+  `quota_exceeded` code is gone. A 409 `key_rotation_conflict` is a plain
+  `HttpException`, not `ChallengeException`.
+
+### Migration
+
+1. Re-enroll every installation: the client's `EnrollBegin` now returns an
+   AK blob, which the client keeps and passes to `Attest` and `MintKey`.
+2. Replace `issueChallenge(ask: [ASK_IDENTITY, ASK_KEY], keyPurpose:
+   KEY_PURPOSE_SIGN)` plus `$result->key()` with
+   `issueKeyChallenge(PURPOSE_SIGN, expectedDevices: [$alias])` and
+   `certifyKey($certification, $nonce)`.
+3. Drop `deviceHint`; bind a challenge to a device with `expectedDevices`,
+   and pass the same value to `verify`.
+4. Read `$key->deviceId` to tie the key to the account; `$key->jwk` may be
+   RSA.
+
+## Unreleased, wire 7.0 (superseded by the entry above)
+
 ### Changed
 
 - `Verdict` is the server's own token: `Verdict::PASS` / `Verdict::WARN` /
