@@ -46,7 +46,8 @@ final class DeviceEncryption
      *
      * @throws \InvalidArgumentException for a key that cannot open the result: a
      *         sign key, a key without a format, a curve other than P-256, a
-     *         coordinate that is not 32 bytes, or an RSA modulus under 2048 bits
+     *         coordinate that is not 32 bytes, an RSA modulus under 2048 bits, or
+     *         an RSA exponent below 3
      * @throws EnvelopeFormatNotSupportedException for an apple-ecies key, which a
      *         macOS enclave opens and needs an Apple-side encryptor
      */
@@ -137,6 +138,10 @@ final class DeviceEncryption
     {
         $n = self::component($jwk['n'] ?? null, 'n');
         $e = self::component($jwk['e'] ?? null, 'e');
+        $significant = ltrim($e, "\x00");
+        if (strlen($significant) === 0 || (strlen($significant) === 1 && ord($significant) < 3)) {
+            throw new \InvalidArgumentException('jwk.e must be at least 3');
+        }
         $recipient = KeySignatures::rsaPublicKey($n, $e);
         $details = openssl_pkey_get_details($recipient);
         $bits = is_array($details) && is_int($details['bits'] ?? null) ? $details['bits'] : 0;

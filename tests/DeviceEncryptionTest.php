@@ -234,6 +234,25 @@ final class DeviceEncryptionTest extends TestCase
         DeviceEncryption::encryptToDevice(self::rsa(1024)['key'], self::PLAINTEXT);
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function smallExponents(): iterable
+    {
+        yield 'zero' => ["\x00"];
+        yield 'one' => ["\x01"];
+        yield 'two with a leading zero' => ["\x00\x02"];
+    }
+
+    /** @dataProvider smallExponents */
+    public function testAnRsaExponentBelow3IsRefused(string $e): void
+    {
+        $rsa = self::rsa()['key'];
+        $jwk = $rsa->jwk;
+        $jwk['e'] = self::b64url($e);
+
+        $this->expectException(\InvalidArgumentException::class);
+        DeviceEncryption::encryptToDevice(self::with($rsa, jwk: $jwk), self::PLAINTEXT);
+    }
+
     public function testAMismatchedAlgAndKtyIsRefused(): void
     {
         $ec = self::ec()['key'];
