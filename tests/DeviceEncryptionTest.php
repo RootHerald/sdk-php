@@ -264,6 +264,101 @@ final class DeviceEncryptionTest extends TestCase
         }
     }
 
+    // ── Known-answer vectors from platform Fixtures/envelope ───────────────
+    //
+    // ECDH-ES replays byte for byte with the vector's ephemeral key and IV.
+    // RSA-OAEP-256 draws its OAEP seed through the seam between the CEK and
+    // the IV and the vector does not record it, so the header, IV, ciphertext
+    // and tag are byte-equal and the encrypted key must unwrap to the
+    // vector's CEK.
+
+    /** @return array<string, mixed> */
+    private static function vector(string $file): array
+    {
+        $json = file_get_contents(__DIR__ . '/fixtures/envelope/' . $file);
+        self::assertNotFalse($json);
+
+        return json_decode($json, true, 8, JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * @param array<string, string> $private
+     * @return array<string, string>
+     */
+    private static function publicJwk(array $private): array
+    {
+        return $private['kty'] === 'EC'
+            ? ['kty' => 'EC', 'crv' => $private['crv'], 'x' => $private['x'], 'y' => $private['y']]
+            : ['kty' => 'RSA', 'n' => $private['n'], 'e' => $private['e']];
+    }
+
+    /** SEC1 ECPrivateKey DER for P-256 from the private JWK's d, x and y. */
+    private static function ecPrivateKey(array $jwk): \OpenSSLAsymmetricKey
+    {
+        $der = "\x30\x77\x02\x01\x01\x04\x20" . self::decode($jwk['d'])
+            . "\xa0\x0a" . hex2bin('06082a8648ce3d030107')
+            . "\xa1\x44\x03\x42\x00\x04" . self::decode($jwk['x']) . self::decode($jwk['y']);
+        $key = openssl_pkey_get_private("-----BEGIN EC PRIVATE KEY-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END EC PRIVATE KEY-----\n");
+        self::assertNotFalse($key);
+
+        return $key;
+    }
+
+    /** @param string[] $chunks served one per call, in order */
+    private static function scripted(array $chunks): callable
+    {
+        return static function (int $n) use (&$chunks): string {
+            $next = array_shift($chunks);
+            self::assertNotNull($next, 'drew more random bytes than the vector records');
+            self::assertSame($n, strlen($next));
+
+            return $next;
+        };
+    }
+
+    public function testEcdhEsVectorReplaysByteForByte(): void
+    {
+        $v = self::vector('ecdh-es-a256gcm.json');
+        $eph = self::ecPrivateKey($v['ephemeral']);
+        $key = self::key(Client::PURPOSE_DECRYPT, 'ECDH-ES', 'jwe', self::publicJwk($v['recipient']));
+
+        $jwe = DeviceEncryption::encryptToDeviceWith(
+            $key,
+            self::decode($v['plaintext']),
+            static fn () => $eph,
+            self::scripted([self::decode($v['iv'])]),
+        );
+
+        self::assertSame($v['jwe'], $jwe);
+    }
+
+    public function testRsaOaep256VectorReplaysExceptTheOaepSeed(): void
+    {
+        $v = self::vector('rsa-oaep-256-a256gcm.json');
+        $r = $v['recipient'];
+        $key = self::key(Client::PURPOSE_DECRYPT, 'RSA-OAEP-256', 'jwe', self::publicJwk($r));
+
+        $jwe = DeviceEncryption::encryptToDeviceWith(
+            $key,
+            self::decode($v['plaintext']),
+            static fn () => self::fail('RSA drew an ephemeral key'),
+            self::scripted([self::decode($v['cek']), str_repeat("\x00", 32), self::decode($v['iv'])]),
+        );
+
+        $expected = explode('.', $v['jwe']);
+        $actual = explode('.', $jwe);
+        foreach ([0, 2, 3, 4] as $i) {
+            self::assertSame($expected[$i], $actual[$i], "segment {$i}");
+        }
+        $priv = openssl_pkey_new(['rsa' => [
+            'n' => self::decode($r['n']), 'e' => self::decode($r['e']), 'd' => self::decode($r['d']),
+            'p' => self::decode($r['p']), 'q' => self::decode($r['q']),
+            'dmp1' => self::decode($r['dp']), 'dmq1' => self::decode($r['dq']), 'iqmp' => self::decode($r['qi']),
+        ]]);
+        self::assertNotFalse($priv);
+        self::assertSame(self::decode($v['cek']), self::unwrap(self::decode($actual[1]), $priv));
+    }
+
     // ── The device's parser, in software ───────────────────────────────────
 
     /**
