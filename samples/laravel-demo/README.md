@@ -17,13 +17,15 @@ ROOTHERALD_SECRET_KEY=rh_sk_live_xxxxxxxx
 
 ## Usage
 
-Drop the snippet in `routes.php` into your `routes/api.php`. Three routes
-show the flow with a certified device key, all via `Rootherald\Client`:
+Drop the snippet in `routes.php` into your `routes/api.php`. Four routes
+show the flow with a device-bound signing key, all via `Rootherald\Client`:
 
-- `POST /challenge` — mint a challenge asking for identity, posture and a
-  signing key; relay its `challenge` string to the client verbatim.
+- `POST /challenge` — mint a challenge asking for identity; relay its
+  `challenge` string to the client verbatim.
 - `POST /attest` — the client posts its opaque evidence blob and the
-  nonce; this server appraises it with the `rh_sk_` secret key and keeps the
-  certified key on a pass.
+  nonce; this server appraises it with the `rh_sk_` secret key and, on a
+  pass, mints a key challenge bound to that device.
+- `POST /certify` — the client posts its `MintKey` certification; this
+  server relays it and stores the key's public half.
 - `POST /verify-signature` — check a later signature from the device against
   the stored key with `Rootherald\KeySignatures`, locally.

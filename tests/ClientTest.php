@@ -10,18 +10,22 @@ use Rootherald\Client;
 use Rootherald\Exceptions\ActivationRefusedException;
 use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\ChallengeException;
+use Rootherald\Exceptions\ExpectedNotEnforcedException;
 use Rootherald\Exceptions\HttpException;
+use Rootherald\Exceptions\InvalidAskException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
 use Rootherald\Exceptions\QuotaExceededException;
 use Rootherald\Exceptions\RateLimitedException;
 use Rootherald\Exceptions\UnknownPolicyException;
+use Rootherald\KeyChallenge;
 use Rootherald\Verdict;
 
 final class ClientTest extends TestCase
 {
     private const NONCE = 'q83vASNFZ4mrze8BI0VniavN7wEjRWeJq83vASNFZ4k';
     private const CHALLENGE = 'rhc1.' . self::NONCE . '.eyJhc2siOlsiaWRlbnRpdHkiLCJwb3N0dXJlIl19';
+    private const KEY_CHALLENGE = 'rhk1c.' . self::NONCE . '.eyJwdXJwb3NlIjoic2lnbiJ9';
 
     private function bg(callable $transport): Client
     {
@@ -40,6 +44,34 @@ final class ClientTest extends TestCase
         ])];
     }
 
+    /** @return array{status: int, body: string} */
+    private static function keyChallengeResponse(): array
+    {
+        return ['status' => 200, 'body' => json_encode([
+            'nonce' => self::NONCE, 'keyChallenge' => self::KEY_CHALLENGE, 'expiresAt' => '2030-01-01T00:00:00Z',
+        ])];
+    }
+
+    /** @return array<string, mixed> */
+    private static function certifiedEcKey(): array
+    {
+        return [
+            'deviceId' => 'dev-9',
+            'keyId' => 'key_1',
+            'purpose' => 'sign',
+            'alg' => 'ES256',
+            'jwk' => ['kty' => 'EC', 'crv' => 'P-256', 'x' => 'eHg', 'y' => 'eXk'],
+            'hardwareBound' => true,
+            'certifiedAt' => '2030-01-01T00:01:00Z',
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private static function tpmCertification(): array
+    {
+        return ['publicArea' => 'cHVi', 'attest' => 'YXR0', 'signature' => 'c2ln'];
+    }
+
     public function testRejectsInvalidPrefixKey(): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -52,6 +84,8 @@ final class ClientTest extends TestCase
         new Client(secretKey: '');
     }
 
+    // ── attest: issueChallenge ─────────────────────────────────────────────
+
     public function testCreateChallenge(): void
     {
         $seen = [];
@@ -60,7 +94,7 @@ final class ClientTest extends TestCase
             $seen['auth'] = $headers['Authorization'] ?? null;
             return self::challengeResponse();
         });
-        $challenge = $bg->issueChallenge('device-hint');
+        $challenge = $bg->issueChallenge();
         $this->assertSame(self::NONCE, $challenge->nonce);
         $this->assertSame(self::CHALLENGE, $challenge->challenge);
         $this->assertSame('2030-01-01T00:00:00Z', $challenge->expiresAt);
@@ -77,9 +111,7 @@ final class ClientTest extends TestCase
         $bg->issueChallenge();
     }
 
-    // ── the challenge carries the ask ──────────────────────────────────────
-
-    public function testIssueChallengeSendsTheAsk(): void
+    public function testIssueChallengeSendsTheAskAndTheBinding(): void
     {
         $seen = [];
         $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
@@ -87,17 +119,15 @@ final class ClientTest extends TestCase
             return self::challengeResponse();
         });
         $challenge = $bg->issueChallenge(
-            deviceHint: 'hint',
-            ask: [Client::ASK_IDENTITY, Client::ASK_KEY],
-            keyPurpose: Client::KEY_PURPOSE_SIGN,
+            ask: [Client::ASK_IDENTITY],
+            expectedKey: 'key_1',
+            expectedDevices: ['dev-9', 'dev-10'],
         );
         $this->assertSame(self::CHALLENGE, $challenge->challenge);
-        $this->assertSame(self::NONCE, $challenge->nonce);
-        $this->assertSame(['identity', 'key'], $seen['body']['ask']);
-        $this->assertSame('sign', $seen['body']['keyPurpose']);
-        $this->assertSame('hint', $seen['body']['deviceHint']);
-        // Policies bind to the API key; the server refuses the field with 400.
-        $this->assertArrayNotHasKey('policy', $seen['body']);
+        $this->assertSame(
+            ['ask' => ['identity'], 'expectedKey' => 'key_1', 'expectedDevices' => ['dev-9', 'dev-10']],
+            $seen['body'],
+        );
     }
 
     public function testIssueChallengeOmitsEveryUnsetField(): void
@@ -112,68 +142,109 @@ final class ClientTest extends TestCase
         // An empty ask means the server default, so it is not sent either.
         $bg->issueChallenge(ask: []);
         $this->assertSame([], $seen['body']);
+        // Nothing the 7.0 signature carried survives: no deviceHint, no keyPurpose.
+        $bg->issueChallenge(ask: [Client::ASK_IDENTITY, Client::ASK_POSTURE]);
+        $this->assertSame(['ask' => ['identity', 'posture']], $seen['body']);
     }
 
-    /** @return array<string, mixed> */
-    private static function passingVerdictWithKey(): array
+    /**
+     * The 7.0 signature was (deviceHint, ask, keyPurpose). Each of those
+     * positional values now meets a parameter of another type, so a 7.0
+     * call fails before any request and nothing lands in expectedKey.
+     *
+     * @return array<string, array{list<mixed>}>
+     */
+    public static function sevenPointZeroPositionalCalls(): array
     {
         return [
-            'verdict' => ['device' => ['verdict' => 'pass', 'ueid' => 'dev-9']],
-            'assuranceClaimsMet' => [],
-            'enrollmentRequired' => false,
-            'key' => [
-                'keyId' => 'key_1',
-                'jwk' => ['kty' => 'EC', 'crv' => 'P-256', 'x' => 'eHg', 'y' => 'eXk'],
-                'purpose' => 'sign',
-                'authPolicy' => 'cG9saWN5',
-                'certifiedAt' => '2030-01-01T00:01:00Z',
-            ],
+            'deviceHint alone' => [['device-hint']],
+            'deviceHint and ask' => [[null, ['identity']]],
+            'ask and keyPurpose' => [[null, ['identity', 'key'], 'sign']],
+            'keyPurpose alone' => [[null, null, 'sign']],
         ];
     }
 
-    public function testVerifyExposesTheCertifiedKeyFromTheResponseRoot(): void
+    /**
+     * @dataProvider sevenPointZeroPositionalCalls
+     * @param list<mixed> $args
+     */
+    public function testASevenPointZeroPositionalCallCannotReachExpectedKey(array $args): void
     {
-        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode(self::passingVerdictWithKey())]);
-        $result = $bg->verify([], nonce: self::NONCE);
-        $this->assertSame(Verdict::PASS, $result->verdict);
-        $key = $result->key();
-        $this->assertInstanceOf(CertifiedKey::class, $key);
-        $this->assertSame('key_1', $key->keyId);
-        $this->assertSame(['kty' => 'EC', 'crv' => 'P-256', 'x' => 'eHg', 'y' => 'eXk'], $key->jwk);
-        $this->assertSame('sign', $key->purpose);
-        $this->assertSame('cG9saWN5', $key->authPolicy);
-        $this->assertSame('2030-01-01T00:01:00Z', $key->certifiedAt);
+        $called = false;
+        $bg = $this->bg(function () use (&$called): array {
+            $called = true;
+            return self::challengeResponse();
+        });
+        try {
+            $bg->issueChallenge(...$args);
+            $this->fail('expected TypeError');
+        } catch (\TypeError) {
+        }
+        $this->assertFalse($called);
     }
 
-    public function testVerifyKeyIsNullWhenAbsent(): void
+    public function testIssueChallengeRefusesAnEmptyBindingBeforeCallingOut(): void
     {
-        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['device' => ['verdict' => 'pass']],
-        ])]);
-        $this->assertNull($bg->verify([], nonce: self::NONCE)->key());
-
-        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['device' => ['verdict' => 'pass']], 'key' => null,
-        ])]);
-        $this->assertNull($bg->verify([], nonce: self::NONCE)->key());
+        $called = false;
+        $bg = $this->bg(function () use (&$called): array {
+            $called = true;
+            return self::challengeResponse();
+        });
+        foreach ([
+            fn () => $bg->issueChallenge(expectedKey: ''),
+            fn () => $bg->issueChallenge(expectedDevices: []),
+            fn () => $bg->issueChallenge(expectedDevices: ['dev-9', '']),
+            fn () => $bg->issueChallenge(expectedDevices: [7]),
+        ] as $call) {
+            try {
+                $call();
+                $this->fail('expected InvalidArgumentException');
+            } catch (\InvalidArgumentException) {
+            }
+        }
+        $this->assertFalse($called);
     }
 
-    public function testVerifyKeyAuthPolicyIsOptional(): void
+    public function testAKeyAskIsAProgrammingErrorNotADeviceFailure(): void
     {
-        $wire = self::passingVerdictWithKey();
-        unset($wire['key']['authPolicy']);
-        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode($wire)]);
-        $this->assertNull($bg->verify([], nonce: self::NONCE)->key()?->authPolicy);
+        $bg = $this->bg(fn () => ['status' => 400, 'body' => '{"error":"invalid_ask","message":"unknown ask: key"}']);
+        try {
+            $bg->issueChallenge(ask: ['identity', 'key']);
+            $this->fail('expected InvalidAskException');
+        } catch (InvalidAskException $e) {
+            $this->assertNotInstanceOf(InvalidEvidenceException::class, $e);
+            $this->assertSame('invalid_ask', $e->serverError);
+            $this->assertSame('invalid_ask', $e->errorCode);
+            $this->assertSame('unknown ask: key', $e->getMessage());
+        }
     }
 
-    public function testVerifyRejectsAMalformedKey(): void
+    public function testAnInvalidPurposeIsAProgrammingErrorNotADeviceFailure(): void
     {
-        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['device' => ['verdict' => 'pass']], 'key' => ['keyId' => 'key_1'],
-        ])]);
-        $this->expectException(HttpException::class);
-        $bg->verify([], nonce: self::NONCE);
+        $bg = $this->bg(fn () => ['status' => 400, 'body' => '{"error":"invalid_purpose","message":"purpose must be one of sign, decrypt"}']);
+        try {
+            $bg->issueKeyChallenge(Client::PURPOSE_SIGN);
+            $this->fail('expected InvalidAskException');
+        } catch (InvalidAskException $e) {
+            $this->assertNotInstanceOf(InvalidEvidenceException::class, $e);
+            $this->assertSame('invalid_purpose', $e->serverError);
+        }
     }
+
+    public function testAnUnknownExpectedValueStaysAGenericHttpException(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 422, 'body' => '{"error":"expected_unknown","message":"no such device"}']);
+        try {
+            $bg->issueChallenge(expectedDevices: ['dev-nope']);
+            $this->fail('expected HttpException');
+        } catch (HttpException $e) {
+            $this->assertSame(HttpException::class, $e::class);
+            $this->assertSame(422, $e->status);
+            $this->assertSame('expected_unknown', $e->serverError);
+        }
+    }
+
+    // ── attest: verify ─────────────────────────────────────────────────────
 
     public function testVerifyRequiresANonceBeforeCallingOut(): void
     {
@@ -214,16 +285,16 @@ final class ClientTest extends TestCase
         $this->assertSame(Verdict::WARN, $bg->verify([], nonce: self::NONCE)->verdict);
     }
 
-    public function testAKeyBesideANonPassingVerdictIsPassedThrough(): void
+    public function testVerifyNoLongerReadsAKey(): void
     {
         $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['device' => ['verdict' => 'fail']],
-            'key' => ['keyId' => 'key_1', 'jwk' => ['kty' => 'EC', 'crv' => 'P-256', 'x' => 'eHg', 'y' => 'eXk'],
-                      'purpose' => 'sign', 'certifiedAt' => '2030-01-01T00:01:00Z'],
+            'verdict' => ['device' => ['verdict' => 'pass', 'ueid' => 'dev-9']],
+            'key' => self::certifiedEcKey(),
         ])]);
         $result = $bg->verify([], nonce: self::NONCE);
-        $this->assertSame(Verdict::FAIL, $result->verdict);
-        $this->assertSame('key_1', $result->key()?->keyId);
+        $this->assertSame(Verdict::PASS, $result->verdict);
+        $this->assertFalse(method_exists($result, 'key'));
+        $this->assertSame('dev-9', $result->deviceId());
     }
 
     public function testDefaultTimeoutIsThirtySeconds(): void
@@ -231,6 +302,365 @@ final class ClientTest extends TestCase
         $this->assertSame(30.0, Client::DEFAULT_TIMEOUT_SECONDS);
         $this->assertSame(30.0, $this->bg(fn () => ['status' => 200, 'body' => '{}'])->timeoutSeconds);
     }
+
+    public function testAttestPassVerdict(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode([
+                'verdict' => [
+                    'acr' => 'urn:rootherald:acr:hardware',
+                    'device' => [
+                        'verdict' => 'pass', 'ueid' => 'dev-9', 'earStatus' => 'affirming',
+                        'tpmKind' => 'firmware-tpm', 'hardwareGenuine' => true, 'bootChangedStages' => [4],
+                    ],
+                ],
+                'assuranceClaimsMet' => ['urn:rootherald:assurance:hardware-backed'],
+                'enrollmentRequired' => false,
+            ])];
+        });
+        $evidence = [
+            'pcrValues' => ['sha256' => ['7' => 'ab']],
+            'quote' => ['quoted' => 'cXVvdGVk', 'signature' => 'c2ln'],
+            'logs' => ['srtm' => 'bG9n'],
+        ];
+        $result = $bg->verify($evidence, nonce: self::NONCE);
+        $this->assertSame(Verdict::PASS, $result->verdict);
+        $this->assertSame(['urn:rootherald:assurance:hardware-backed'], $result->assuranceClaimsMet);
+        $this->assertFalse($result->enrollmentRequired);
+        $this->assertNull($result->expected());
+        $this->assertSame('firmware-tpm', $result->device()['tpmKind']);
+        $this->assertSame([4], $result->device()['bootChangedStages']);
+        $this->assertSame(self::NONCE, $seen['body']['nonce']);
+        $this->assertSame($evidence, $seen['body']['evidence']);
+        $this->assertArrayNotHasKey('challengeId', $seen['body']);
+        $this->assertArrayNotHasKey('policy', $seen['body']);
+    }
+
+    public function testVerifySendsRequestedDisclosureClass(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode([
+                'verdict' => ['device' => ['verdict' => 'pass']],
+            ])];
+        });
+        $bg->verify([], nonce: self::NONCE, requestedDisclosureClass: 'pseudonymous');
+        $this->assertSame('pseudonymous', $seen['body']['requestedDisclosureClass']);
+    }
+
+    public function testVerifyOmitsRequestedDisclosureClassWhenUnset(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode([
+                'verdict' => ['device' => ['verdict' => 'pass']],
+            ])];
+        });
+        $bg->verify([], nonce: self::NONCE);
+        $this->assertArrayNotHasKey('requestedDisclosureClass', $seen['body']);
+    }
+
+    public function testEnrollmentRequiredIsSurfaced(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
+            'verdict' => ['device' => ['verdict' => 'fail']],
+            'assuranceClaimsMet' => [],
+            'enrollmentRequired' => true,
+        ])]);
+        $result = $bg->verify([], nonce: self::NONCE);
+        $this->assertSame(Verdict::FAIL, $result->verdict);
+        $this->assertTrue($result->enrollmentRequired);
+        $this->assertArrayNotHasKey('ueid', $result->device());
+        $this->assertNull($result->deviceId());
+    }
+
+    // ── attest: the verdict echoes the binding ─────────────────────────────
+
+    /** @return array{status: int, body: string} */
+    private static function boundVerdict(string $verdictToken, ?string $ueid, ?array $expected): array
+    {
+        $device = ['verdict' => $verdictToken];
+        if ($ueid !== null) {
+            $device['ueid'] = $ueid;
+        }
+        $verdict = ['device' => $device];
+        if ($expected !== null) {
+            $verdict['expected'] = $expected;
+        }
+
+        return ['status' => 200, 'body' => json_encode(['verdict' => $verdict])];
+    }
+
+    public function testVerifyAcceptsAVerdictThatEchoesTheBinding(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            return self::boundVerdict('pass', 'dev-9', ['key' => 'key_1', 'devices' => ['dev-10', 'dev-9']]);
+        });
+        $result = $bg->verify([], nonce: self::NONCE, expectedKey: 'key_1', expectedDevices: ['dev-9', 'dev-10']);
+        $this->assertSame(Verdict::PASS, $result->verdict);
+        $this->assertSame(['key' => 'key_1', 'devices' => ['dev-10', 'dev-9']], $result->expected());
+        // The binding was fixed at the challenge; verify sends nonce and evidence only.
+        $this->assertSame(['nonce', 'evidence'], array_keys($seen['body']));
+    }
+
+    public function testVerifyComparesAliasesCaseInsensitively(): void
+    {
+        $bg = $this->bg(fn () => self::boundVerdict('pass', 'dev-9', ['devices' => ['dev-9', 'dev-10']]));
+        $result = $bg->verify([], nonce: self::NONCE, expectedDevices: [' DEV-9 ', 'Dev-10']);
+        $this->assertSame(Verdict::PASS, $result->verdict);
+    }
+
+    public function testVerifyRefusesAVerdictThatDoesNotEchoTheKey(): void
+    {
+        foreach ([null, [], ['key' => 'key_other'], ['devices' => ['dev-9']]] as $expected) {
+            $bg = $this->bg(fn () => self::boundVerdict('pass', 'dev-9', $expected));
+            try {
+                $bg->verify([], nonce: self::NONCE, expectedKey: 'key_1');
+                $this->fail('expected ExpectedNotEnforcedException for ' . json_encode($expected));
+            } catch (ExpectedNotEnforcedException $e) {
+                $this->assertSame('expected_not_enforced', $e->errorCode);
+                $this->assertStringContainsString('expectedKey', $e->getMessage());
+            }
+        }
+    }
+
+    public function testVerifyRefusesAVerdictThatDoesNotEchoTheDevices(): void
+    {
+        foreach ([null, ['key' => 'key_1'], ['devices' => []], ['devices' => ['dev-9']], ['devices' => ['dev-9', 'dev-10', 'dev-11']]] as $expected) {
+            $bg = $this->bg(fn () => self::boundVerdict('pass', 'dev-9', $expected));
+            try {
+                $bg->verify([], nonce: self::NONCE, expectedDevices: ['dev-9', 'dev-10']);
+                $this->fail('expected ExpectedNotEnforcedException for ' . json_encode($expected));
+            } catch (ExpectedNotEnforcedException $e) {
+                $this->assertStringContainsString('expectedDevices', $e->getMessage());
+            }
+        }
+    }
+
+    public function testVerifyRefusesAPassingVerdictNamingADeviceOutsideTheBinding(): void
+    {
+        $bg = $this->bg(fn () => self::boundVerdict('pass', 'dev-99', ['devices' => ['dev-9']]));
+        $this->expectException(ExpectedNotEnforcedException::class);
+        $bg->verify([], nonce: self::NONCE, expectedDevices: ['dev-9']);
+    }
+
+    public function testVerifyAcceptsAFailingVerdictAgainstTheActualDevice(): void
+    {
+        // A mismatch is reported against the device that answered; that is the
+        // server enforcing the binding, not ignoring it.
+        $bg = $this->bg(fn () => self::boundVerdict('fail', 'dev-99', ['devices' => ['dev-9']]));
+        $result = $bg->verify([], nonce: self::NONCE, expectedDevices: ['dev-9']);
+        $this->assertSame(Verdict::FAIL, $result->verdict);
+        $this->assertSame('dev-99', $result->deviceId());
+    }
+
+    public function testVerifyWithoutABindingIgnoresTheEcho(): void
+    {
+        $bg = $this->bg(fn () => self::boundVerdict('pass', 'dev-9', ['key' => 'key_1']));
+        $result = $bg->verify([], nonce: self::NONCE);
+        $this->assertSame(['key' => 'key_1'], $result->expected());
+    }
+
+    // ── mint a key: issueKeyChallenge / certifyKey ─────────────────────────
+
+    public function testIssueKeyChallengeSendsThePurposeAndTheDevices(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['url'] = $url;
+            $seen['auth'] = $headers['Authorization'] ?? null;
+            $seen['body'] = json_decode((string) $body, true);
+            return self::keyChallengeResponse();
+        });
+        $challenge = $bg->issueKeyChallenge(Client::PURPOSE_SIGN, expectedDevices: ['dev-9']);
+        $this->assertInstanceOf(KeyChallenge::class, $challenge);
+        $this->assertSame(self::NONCE, $challenge->nonce);
+        $this->assertSame(self::KEY_CHALLENGE, $challenge->keyChallenge);
+        $this->assertSame('2030-01-01T00:00:00Z', $challenge->expiresAt);
+        $this->assertSame($challenge->nonce, explode('.', $challenge->keyChallenge)[1]);
+        $this->assertStringEndsWith('/api/v1/keys/challenge', $seen['url']);
+        $this->assertSame('Bearer rh_sk_test_xxx', $seen['auth']);
+        $this->assertSame(['purpose' => 'sign', 'expectedDevices' => ['dev-9']], $seen['body']);
+
+        $bg->issueKeyChallenge(Client::PURPOSE_DECRYPT);
+        $this->assertSame(['purpose' => 'decrypt'], $seen['body']);
+    }
+
+    public function testIssueKeyChallengeRefusesAnUnknownPurposeBeforeCallingOut(): void
+    {
+        $called = false;
+        $bg = $this->bg(function () use (&$called): array {
+            $called = true;
+            return self::keyChallengeResponse();
+        });
+        try {
+            $bg->issueKeyChallenge('key');
+            $this->fail('expected InvalidArgumentException');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('purpose', $e->getMessage());
+        }
+        $this->assertFalse($called);
+    }
+
+    public function testKeyChallengeResponseMustCarryNonceKeyChallengeAndExpiry(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
+            'nonce' => self::NONCE, 'challenge' => self::CHALLENGE, 'expiresAt' => '2030-01-01T00:00:00Z',
+        ])]);
+        $this->expectException(HttpException::class);
+        $bg->issueKeyChallenge(Client::PURPOSE_SIGN);
+    }
+
+    public function testKeyDisclosureTooLowStaysAGenericHttpException(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 422, 'body' => '{"error":"key_disclosure_too_low"}']);
+        try {
+            $bg->issueKeyChallenge(Client::PURPOSE_SIGN);
+            $this->fail('expected HttpException');
+        } catch (HttpException $e) {
+            $this->assertSame(HttpException::class, $e::class);
+            $this->assertSame('key_disclosure_too_low', $e->serverError);
+        }
+    }
+
+    public function testCertifyKeyRelaysTheCertificationAndReturnsTheKey(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['url'] = $url;
+            $seen['body'] = json_decode((string) $body, true);
+            return ['status' => 200, 'body' => json_encode(self::certifiedEcKey())];
+        });
+        $key = $bg->certifyKey(self::tpmCertification(), self::NONCE);
+        $this->assertInstanceOf(CertifiedKey::class, $key);
+        $this->assertSame('dev-9', $key->deviceId);
+        $this->assertSame('key_1', $key->keyId);
+        $this->assertSame('sign', $key->purpose);
+        $this->assertSame(CertifiedKey::ALG_ES256, $key->alg);
+        $this->assertSame(['kty' => 'EC', 'crv' => 'P-256', 'x' => 'eHg', 'y' => 'eXk'], $key->jwk);
+        $this->assertTrue($key->hardwareBound);
+        $this->assertNull($key->format);
+        $this->assertSame('2030-01-01T00:01:00Z', $key->certifiedAt);
+        $this->assertStringEndsWith('/api/v1/keys/certify', $seen['url']);
+        $this->assertSame(['nonce' => self::NONCE, 'certification' => self::tpmCertification()], $seen['body']);
+    }
+
+    public function testCertifyKeyReadsAnRsaKey(): void
+    {
+        $wire = self::certifiedEcKey();
+        $wire['alg'] = 'RS256';
+        $wire['jwk'] = ['kty' => 'RSA', 'n' => 'bW9k', 'e' => 'AQAB'];
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode($wire)]);
+        $key = $bg->certifyKey(self::tpmCertification(), self::NONCE);
+        $this->assertSame(CertifiedKey::ALG_RS256, $key->alg);
+        $this->assertSame(['kty' => 'RSA', 'n' => 'bW9k', 'e' => 'AQAB'], $key->jwk);
+    }
+
+    public function testCertifyKeyReadsADecryptKeyWithItsFormat(): void
+    {
+        $wire = self::certifiedEcKey();
+        $wire['purpose'] = 'decrypt';
+        $wire['alg'] = 'ECDH-ES';
+        $wire['format'] = 'jwe';
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode($wire)]);
+        $key = $bg->certifyKey(self::tpmCertification(), self::NONCE);
+        $this->assertSame('decrypt', $key->purpose);
+        $this->assertSame(CertifiedKey::ALG_ECDH_ES, $key->alg);
+        $this->assertSame('jwe', $key->format);
+    }
+
+    public function testCertifyKeyRelaysTheApplePlatformFormsVerbatim(): void
+    {
+        $seen = [];
+        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
+            $seen['body'] = json_decode((string) $body, true);
+            $wire = self::certifiedEcKey();
+            $wire['hardwareBound'] = false;
+            return ['status' => 200, 'body' => json_encode($wire)];
+        });
+        $macos = ['platform' => 'macos', 'publicKey' => 'BJ4=', 'signature' => 'c2ln'];
+        $this->assertFalse($bg->certifyKey($macos, self::NONCE)->hardwareBound);
+        $this->assertSame($macos, $seen['body']['certification']);
+
+        $ios = ['platform' => 'ios', 'keyId' => 'a2V5', 'assertion' => 'Y2Jvcg=='];
+        $bg->certifyKey($ios, self::NONCE);
+        $this->assertSame($ios, $seen['body']['certification']);
+    }
+
+    public function testCertifyKeyRefusesBadInputBeforeCallingOut(): void
+    {
+        $called = false;
+        $bg = $this->bg(function () use (&$called): array {
+            $called = true;
+            return ['status' => 200, 'body' => json_encode(self::certifiedEcKey())];
+        });
+        foreach ([
+            fn () => $bg->certifyKey(self::tpmCertification(), ''),
+            fn () => $bg->certifyKey([], self::NONCE),
+            fn () => $bg->certifyKey(['publicArea' => 'cHVi', 'attest' => 'YXR0'], self::NONCE),
+        ] as $call) {
+            try {
+                $call();
+                $this->fail('expected InvalidArgumentException');
+            } catch (\InvalidArgumentException) {
+            }
+        }
+        $this->assertFalse($called);
+    }
+
+    /** @return array<string, array{array<string, mixed>}> */
+    public static function malformedCertifiedKeys(): array
+    {
+        $good = self::certifiedEcKey();
+        $rsa = ['kty' => 'RSA', 'n' => 'bW9k', 'e' => 'AQAB'];
+
+        return [
+            'no deviceId' => [array_diff_key($good, ['deviceId' => 1])],
+            'no keyId' => [['keyId' => ''] + $good],
+            'unknown purpose' => [['purpose' => 'key'] + $good],
+            'no hardwareBound' => [array_diff_key($good, ['hardwareBound' => 1])],
+            'hardwareBound as a string' => [['hardwareBound' => 'true'] + $good],
+            'no certifiedAt' => [array_diff_key($good, ['certifiedAt' => 1])],
+            'RSA alg on an EC key' => [['alg' => 'RS256'] + $good],
+            'EC alg on an RSA key' => [['jwk' => $rsa] + $good],
+            'P-384 jwk' => [['jwk' => ['kty' => 'EC', 'crv' => 'P-384', 'x' => 'eHg', 'y' => 'eXk']] + $good],
+            'jwk missing y' => [['jwk' => ['kty' => 'EC', 'crv' => 'P-256', 'x' => 'eHg']] + $good],
+            'unknown format' => [['format' => 'pem'] + $good],
+            'unknown alg' => [['alg' => 'HS256'] + $good],
+        ];
+    }
+
+    /**
+     * @dataProvider malformedCertifiedKeys
+     * @param array<string, mixed> $wire
+     */
+    public function testCertifyKeyRefusesAMalformedKeyRatherThanReturningItHalfParsed(array $wire): void
+    {
+        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode($wire)]);
+        $this->expectException(HttpException::class);
+        $bg->certifyKey(self::tpmCertification(), self::NONCE);
+    }
+
+    public function testAKeyRotationConflictIsNotAChallengeError(): void
+    {
+        $bg = $this->bg(fn () => ['status' => 409, 'body' => '{"error":"key_rotation_conflict","message":"rotation collided"}']);
+        try {
+            $bg->certifyKey(self::tpmCertification(), self::NONCE);
+            $this->fail('expected HttpException');
+        } catch (HttpException $e) {
+            $this->assertNotInstanceOf(ChallengeException::class, $e);
+            $this->assertSame(409, $e->status);
+            $this->assertSame('key_rotation_conflict', $e->serverError);
+        }
+    }
+
+    // ── errors ─────────────────────────────────────────────────────────────
 
     public function testA401ActivationRefusedIsNotAnInvalidKey(): void
     {
@@ -279,11 +709,33 @@ final class ClientTest extends TestCase
         }
     }
 
+    public function testABudgetExhausted429NamesTheBudget(): void
+    {
+        $bg = $this->bg(fn () => [
+            'status' => 429,
+            'body' => '{"error":"budget_exhausted","message":"budget exhausted","budget":{"id":"bud_1","name":"Production"}}',
+            'headers' => ['X-RootHerald-Quota' => 'budget-exhausted'],
+        ]);
+        try {
+            $bg->verify([], nonce: self::NONCE);
+            $this->fail('expected QuotaExceededException');
+        } catch (QuotaExceededException $e) {
+            $this->assertSame('budget_exhausted', $e->errorCode);
+            $this->assertSame('budget_exhausted', $e->serverError);
+            $this->assertSame(['id' => 'bud_1', 'name' => 'Production'], $e->budget);
+            $this->assertSame('Production', $e->budget['name']);
+        }
+    }
+
     public function testA429WithTheQuotaHeaderIsTheQuotaWhateverTheBody(): void
     {
-        $bg = $this->bg(fn () => ['status' => 429, 'body' => '{}', 'headers' => ['X-RootHerald-Quota' => 'device-limit-exceeded']]);
-        $this->expectException(QuotaExceededException::class);
-        $bg->verify([], nonce: self::NONCE);
+        $bg = $this->bg(fn () => ['status' => 429, 'body' => '{}', 'headers' => ['X-RootHerald-Quota' => 'budget-exhausted']]);
+        try {
+            $bg->verify([], nonce: self::NONCE);
+            $this->fail('expected QuotaExceededException');
+        } catch (QuotaExceededException $e) {
+            $this->assertNull($e->budget);
+        }
     }
 
     public function testA422OrA402WithACodeNoClassCoversStaysGeneric(): void
@@ -326,73 +778,6 @@ final class ClientTest extends TestCase
             $this->assertSame('challenge_expired_or_used', $e->serverError);
             $this->assertSame('used', $e->getMessage());
         }
-    }
-
-    public function testAttestPassVerdict(): void
-    {
-        $seen = [];
-        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
-            $seen['body'] = json_decode((string) $body, true);
-            return ['status' => 200, 'body' => json_encode([
-                'verdict' => [
-                    'acr' => 'urn:rootherald:acr:hardware',
-                    'device' => ['verdict' => 'pass', 'ueid' => 'dev-9', 'earStatus' => 'affirming'],
-                ],
-                'assuranceClaimsMet' => ['urn:rootherald:assurance:hardware-backed'],
-                'enrollmentRequired' => false,
-            ])];
-        });
-        $evidence = [
-            'pcrValues' => ['sha256' => ['7' => 'ab']],
-            'quote' => ['quoted' => 'cXVvdGVk', 'signature' => 'c2ln'],
-        ];
-        $result = $bg->verify($evidence, nonce: self::NONCE);
-        $this->assertSame(Verdict::PASS, $result->verdict);
-        $this->assertSame(['urn:rootherald:assurance:hardware-backed'], $result->assuranceClaimsMet);
-        $this->assertFalse($result->enrollmentRequired);
-        $this->assertSame(self::NONCE, $seen['body']['nonce']);
-        $this->assertSame($evidence, $seen['body']['evidence']);
-        $this->assertArrayNotHasKey('challengeId', $seen['body']);
-        $this->assertArrayNotHasKey('policy', $seen['body']);
-    }
-
-    public function testVerifySendsRequestedDisclosureClass(): void
-    {
-        $seen = [];
-        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
-            $seen['body'] = json_decode((string) $body, true);
-            return ['status' => 200, 'body' => json_encode([
-                'verdict' => ['device' => ['verdict' => 'pass']],
-            ])];
-        });
-        $bg->verify([], nonce: self::NONCE, requestedDisclosureClass: 'pseudonymous');
-        $this->assertSame('pseudonymous', $seen['body']['requestedDisclosureClass']);
-    }
-
-    public function testVerifyOmitsRequestedDisclosureClassWhenUnset(): void
-    {
-        $seen = [];
-        $bg = $this->bg(function (string $method, string $url, array $headers, ?string $body) use (&$seen): array {
-            $seen['body'] = json_decode((string) $body, true);
-            return ['status' => 200, 'body' => json_encode([
-                'verdict' => ['device' => ['verdict' => 'pass']],
-            ])];
-        });
-        $bg->verify([], nonce: self::NONCE);
-        $this->assertArrayNotHasKey('requestedDisclosureClass', $seen['body']);
-    }
-
-    public function testEnrollmentRequiredIsSurfaced(): void
-    {
-        $bg = $this->bg(fn () => ['status' => 200, 'body' => json_encode([
-            'verdict' => ['device' => ['verdict' => 'fail']],
-            'assuranceClaimsMet' => [],
-            'enrollmentRequired' => true,
-        ])]);
-        $result = $bg->verify([], nonce: self::NONCE);
-        $this->assertSame(Verdict::FAIL, $result->verdict);
-        $this->assertTrue($result->enrollmentRequired);
-        $this->assertArrayNotHasKey('ueid', $result->device());
     }
 
     public function testCohortFieldsAreExposed(): void
@@ -449,9 +834,20 @@ final class ClientTest extends TestCase
             '401 activation_refused' => [401, 'activation_refused', ActivationRefusedException::class],
             '422' => [422, 'unknown_policy', UnknownPolicyException::class],
             '422 admission_refused' => [422, 'admission_refused', AdmissionRefusedException::class],
+            '422 expected_unknown' => [422, 'expected_unknown', HttpException::class],
+            '422 key_disclosure_too_low' => [422, 'key_disclosure_too_low', HttpException::class],
             '409' => [409, 'x', ChallengeException::class],
+            '409 key_rotation_conflict' => [409, 'key_rotation_conflict', HttpException::class],
             '400' => [400, 'x', InvalidEvidenceException::class],
-            '429 quota_exceeded' => [429, 'quota_exceeded', QuotaExceededException::class],
+            '400 wire_version_unsupported' => [400, 'wire_version_unsupported', InvalidEvidenceException::class],
+            '400 invalid_enroll_shape' => [400, 'invalid_enroll_shape', InvalidEvidenceException::class],
+            '400 invalid_ask' => [400, 'invalid_ask', InvalidAskException::class],
+            '400 invalid_purpose' => [400, 'invalid_purpose', InvalidAskException::class],
+            '400 invalid_certification' => [400, 'invalid_certification', InvalidEvidenceException::class],
+            '409 challenge_expired_or_used' => [409, 'challenge_expired_or_used', ChallengeException::class],
+            '422 purpose_unsupported' => [422, 'purpose_unsupported', HttpException::class],
+            '422 certification_rejected' => [422, 'certification_rejected', HttpException::class],
+            '429 budget_exhausted' => [429, 'budget_exhausted', QuotaExceededException::class],
             '429 rate_limited' => [429, 'rate_limited', RateLimitedException::class],
         ];
     }
@@ -460,7 +856,12 @@ final class ClientTest extends TestCase
     public function testErrorMapping(int $status, string $code, string $exception): void
     {
         $bg = $this->bg(fn () => ['status' => $status, 'body' => json_encode(['error' => $code, 'message' => 'boom'])]);
-        $this->expectException($exception);
-        $bg->verify([], nonce: self::NONCE);
+        try {
+            $bg->verify([], nonce: self::NONCE);
+            $this->fail("expected {$exception}");
+        } catch (HttpException $e) {
+            $this->assertSame($exception, $e::class);
+            $this->assertSame($code, $e->serverError);
+        }
     }
 }

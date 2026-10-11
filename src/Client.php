@@ -7,7 +7,9 @@ namespace Rootherald;
 use Rootherald\Exceptions\ActivationRefusedException;
 use Rootherald\Exceptions\AdmissionRefusedException;
 use Rootherald\Exceptions\ChallengeException;
+use Rootherald\Exceptions\ExpectedNotEnforcedException;
 use Rootherald\Exceptions\HttpException;
+use Rootherald\Exceptions\InvalidAskException;
 use Rootherald\Exceptions\InvalidEvidenceException;
 use Rootherald\Exceptions\InvalidSecretKeyException;
 use Rootherald\Exceptions\QuotaExceededException;
@@ -15,25 +17,24 @@ use Rootherald\Exceptions\RateLimitedException;
 use Rootherald\Exceptions\UnknownPolicyException;
 
 /**
- * Server -> server backend-relay client (client ABI 7.0).
+ * Server -> server backend-relay client (client ABI 8.0).
  *
- * The customer's keyless dumb client does only local TPM work and hands opaque
- * blobs to the customer's own backend — it holds no Root Herald key and opens no
- * socket to Root Herald. This client is the only thing that talks to Root Herald,
- * authenticated with the customer's `rh_sk_` secret key. Nothing it sends
- * locates a row: the server resolves the tenant from the key, the challenge
- * from the nonce the proof was made over, the enrollment from the id it
- * minted, and the device from the proof itself. It mirrors the four
- * server-SDK helpers of `@rootherald/node`:
+ * The customer's keyless client does only local TPM work and hands opaque
+ * blobs to the customer's own backend — it holds no Root Herald key and opens
+ * no socket to Root Herald. This client is the only thing that talks to Root
+ * Herald, authenticated with the customer's `rh_sk_` secret key. Nothing it
+ * sends locates a row: the server resolves the tenant from the key, the
+ * challenge from the nonce the proof was made over, the enrollment from the
+ * id it minted, and the installation from the proof itself. Three ceremonies,
+ * two legs each, mirroring `@rootherald/node`:
  *
- *   1. {@see relayEnroll}    — relay the client's enroll blob; `POST /api/v1/attest/enroll`
- *   2. {@see relayActivate}  — relay the client's activation blob; `POST /api/v1/attest/activate`
- *   3. {@see issueChallenge} — mint a challenge carrying the ask; `POST /api/v1/attest/challenge`
- *   4. {@see verify}         — submit the evidence, get the verdict; `POST /api/v1/attest/verify`
+ *   enroll      {@see relayEnroll} / {@see relayActivate}        `POST /api/v1/attest/enroll`, `/activate`
+ *   mint a key  {@see issueKeyChallenge} / {@see certifyKey}     `POST /api/v1/keys/challenge`, `/certify`
+ *   attest      {@see issueChallenge} / {@see verify}            `POST /api/v1/attest/challenge`, `/verify`
  *
  * The verdict is computed by Root Herald and returned HERE, to the customer's
- * backend — it never travels through the client, which holds no key and gets no
- * verdict.
+ * backend — it never travels through the client, which holds no key and gets
+ * no verdict.
  *
  * The REST call uses PHP's curl extension directly (no Guzzle dependency).
  * Inject a custom HTTP transport for testing.
@@ -47,7 +48,7 @@ final class Client
 
     private const SECRET_KEY_PREFIX = 'rh_sk_';
 
-    /** Marks a 429 as the metered quota, whatever the body says. */
+    /** Marks a 429 as the budget refusal, whatever the body says. */
     private const QUOTA_HEADER = 'x-rootherald-quota';
 
     private readonly string $baseUrl;
@@ -133,14 +134,17 @@ final class Client
         return false;
     }
 
-    /** Ask: prove which enrolled device this is. */
+    /** Ask: prove which enrolled installation this is. */
     public const ASK_IDENTITY = 'identity';
     /** Ask: prove the boot / configuration state (quote + event log). */
     public const ASK_POSTURE = 'posture';
-    /** Ask: certify a fresh TPM-resident signing key under the AK. */
-    public const ASK_KEY = 'key';
-    /** The only key purpose today. */
-    public const KEY_PURPOSE_SIGN = 'sign';
+
+    /** Key purpose: a signing key (ES256 / RS256). */
+    public const PURPOSE_SIGN = 'sign';
+    /** Key purpose: a decrypt key (ECDH-ES / RSA-OAEP-256); refused by the server before wire 8.1. */
+    public const PURPOSE_DECRYPT = 'decrypt';
+
+    private const PURPOSES = [self::PURPOSE_SIGN, self::PURPOSE_DECRYPT];
 
     /**
      * POST /api/v1/attest/challenge — mint a challenge that carries the ask.
@@ -152,29 +156,37 @@ final class Client
      * bind to the API key: the server resolves the policy from the key that
      * mints the challenge and pins it on the challenge, so nothing between
      * the two calls can change it. A `policy` field in a hand-built body is
-     * refused with 400 policy_bound_to_key; bind one from the dashboard or
-     * `PUT /api/v1/admin/api-keys/{id}/policies`.
+     * refused with 400 policy_bound_to_key.
      *
-     * @param string|null       $deviceHint optional advisory hint identifying the device
-     * @param list<string>|null $ask        any of ASK_IDENTITY / ASK_POSTURE / ASK_KEY;
-     *        null or empty means the server default, identity + posture
-     * @param string|null       $keyPurpose purpose of the certified key when asking for ASK_KEY
-     *        (KEY_PURPOSE_SIGN)
+     * Call with named arguments. A `"key"` ask is refused by the server with
+     * 400 invalid_ask ({@see InvalidAskException}); keys have their own
+     * ceremony, {@see issueKeyChallenge}.
+     *
+     * @param list<string>|null $ask             any of ASK_IDENTITY / ASK_POSTURE; null or empty
+     *        means the server default, identity + posture
+     * @param string|null       $expectedKey     the keyId of a key this tenant certified; only the
+     *        installation holding it can pass, any other answers a failing verdict with reason
+     *        expected_device_mismatch; an unknown id is 422 expected_unknown
+     * @param list<string>|null $expectedDevices aliases (`verdict.device.ueid`) this tenant
+     *        enrolled; only one of them can pass; an unknown alias is 422 expected_unknown
+     *
+     * @throws \InvalidArgumentException if expectedKey is empty or expectedDevices is not a
+     *         non-empty list of non-empty strings; no request is made
      */
     public function issueChallenge(
-        ?string $deviceHint = null,
         ?array $ask = null,
-        ?string $keyPurpose = null,
+        ?string $expectedKey = null,
+        ?array $expectedDevices = null,
     ): Challenge {
         $body = [];
-        if ($deviceHint !== null) {
-            $body['deviceHint'] = $deviceHint;
-        }
         if ($ask !== null && $ask !== []) {
             $body['ask'] = array_values($ask);
         }
-        if ($keyPurpose !== null) {
-            $body['keyPurpose'] = $keyPurpose;
+        if ($expectedKey !== null) {
+            $body['expectedKey'] = self::requireNonEmptyString($expectedKey, 'expectedKey');
+        }
+        if ($expectedDevices !== null) {
+            $body['expectedDevices'] = self::requireAliasList($expectedDevices, 'expectedDevices');
         }
         $data = $this->post('/api/v1/attest/challenge', $body);
         if (
@@ -192,7 +204,7 @@ final class Client
      * server-side appraisal and return the verdict.
      *
      * An un-enrolled / failing device is NOT an error — it returns a normal
-     * AttestResult carrying Verdict::FAIL/WARN. Only protocol/auth/quota
+     * AttestResult carrying Verdict::FAIL/WARN. Only protocol/auth/budget
      * problems raise an exception; a response whose verdict token is not one
      * of pass/warn/fail is one too (HttpException).
      *
@@ -202,10 +214,18 @@ final class Client
      * exists raises {@see UnknownPolicyException} (422 unknown_policy);
      * nothing is substituted.
      *
+     * When the challenge named expectedKey or expectedDevices, pass the same
+     * values here: the verdict must echo them under `expected`, and a response
+     * that does not is refused with {@see ExpectedNotEnforcedException}. The
+     * API ignores unknown fields, so a server that predates the binding would
+     * otherwise accept any device silently.
+     *
      * @param array<string, mixed> $evidence opaque blob from the client collector; passed through verbatim
      * @param string               $nonce    the challenge handle from issueChallenge; the server finds the
      *        single-use challenge by it and checks the proof was made over it
      * @param string|null          $requestedDisclosureClass optional disclosure ceiling ("verdict"|"pseudonymous"|"derived"|"full"); omitted when null
+     * @param string|null          $expectedKey     the expectedKey the challenge was issued with
+     * @param list<string>|null    $expectedDevices the expectedDevices the challenge was issued with
      *
      * @throws \InvalidArgumentException if the nonce is empty; no request is made
      */
@@ -213,9 +233,17 @@ final class Client
         array $evidence,
         string $nonce,
         ?string $requestedDisclosureClass = null,
+        ?string $expectedKey = null,
+        ?array $expectedDevices = null,
     ): AttestResult {
         if ($nonce === '') {
             throw new \InvalidArgumentException('verify() requires a nonce (from issueChallenge)');
+        }
+        if ($expectedKey !== null) {
+            self::requireNonEmptyString($expectedKey, 'expectedKey');
+        }
+        if ($expectedDevices !== null) {
+            $expectedDevices = self::requireAliasList($expectedDevices, 'expectedDevices');
         }
         $body = [
             'nonce' => $nonce,
@@ -255,36 +283,197 @@ final class Client
         }
         $enrollmentRequired = ($data['enrollmentRequired'] ?? null) === true;
 
-        // `key` is a top-level sibling too, passed through as the server sent it.
-        $key = null;
-        if (($data['key'] ?? null) !== null) {
-            $key = CertifiedKey::fromWire($data['key']);
-            if ($key === null) {
-                throw new HttpException(200, json_encode($data) ?: '', 'verify response key missing keyId/jwk/certifiedAt');
-            }
-        }
-
-        return new AttestResult(
+        $result = new AttestResult(
             $verdict,
             $verdictData,
             $assuranceClaimsMet,
             $enrollmentRequired,
-            $key,
         );
+
+        if ($expectedKey !== null || $expectedDevices !== null) {
+            self::requireExpectedEnforced($result, $data, $expectedKey, $expectedDevices);
+        }
+
+        return $result;
+    }
+
+    /**
+     * A verdict is only as bound as the server says it enforced. The API
+     * ignores unknown JSON fields, so a server that predates the binding would
+     * accept any device and answer a verdict with no `expected` block;
+     * comparing the echo with what was asked turns that silence into a refusal.
+     *
+     * @param array<string, mixed> $data
+     * @param list<string>|null    $expectedDevices
+     */
+    private static function requireExpectedEnforced(
+        AttestResult $result,
+        array $data,
+        ?string $expectedKey,
+        ?array $expectedDevices,
+    ): void {
+        $echoed = $result->expected();
+        $refuse = static fn (string $what): ExpectedNotEnforcedException => new ExpectedNotEnforcedException(
+            200,
+            json_encode($data) ?: '',
+            "verify response did not echo the {$what} the challenge named; the binding was not enforced",
+        );
+        if ($expectedKey !== null && ($echoed['key'] ?? null) !== $expectedKey) {
+            throw $refuse('expectedKey');
+        }
+        if ($expectedDevices !== null) {
+            // Aliases are GUIDs: the server accepts any spelling and echoes lowercase.
+            $asked = array_map([self::class, 'normalizeAlias'], $expectedDevices);
+            $devices = $echoed['devices'] ?? null;
+            if (!is_array($devices) || !self::sameSet($devices, $asked)) {
+                throw $refuse('expectedDevices');
+            }
+            $ueid = $result->device()['ueid'] ?? null;
+            if ($result->verdict !== Verdict::FAIL && is_string($ueid) && !in_array(self::normalizeAlias($ueid), $asked, true)) {
+                throw $refuse('expectedDevices');
+            }
+        }
+    }
+
+    private static function normalizeAlias(string $alias): string
+    {
+        return strtolower(trim($alias));
+    }
+
+    /**
+     * @param array<mixed>  $a
+     * @param list<string>  $b
+     */
+    private static function sameSet(array $a, array $b): bool
+    {
+        $seen = array_values(array_unique(array_map([self::class, 'normalizeAlias'], array_filter($a, 'is_string'))));
+        if (count($seen) !== count(array_unique($b))) {
+            return false;
+        }
+        foreach ($b as $v) {
+            if (!in_array($v, $seen, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * POST /api/v1/keys/challenge — mint a single-use key challenge for a
+     * purpose. Relay {@see KeyChallenge::$keyChallenge} to the client
+     * verbatim; its `MintKey` answers with a certification, which you submit
+     * with {@see certifyKey} under the returned {@see KeyChallenge::$nonce}.
+     *
+     * Refused with 422 key_disclosure_too_low when the API key's disclosure
+     * ceiling is below pseudonymous: a key whose id could never be returned is
+     * never minted.
+     *
+     * @param string            $purpose         PURPOSE_SIGN or PURPOSE_DECRYPT
+     * @param list<string>|null $expectedDevices aliases (`verdict.device.ueid`) this tenant
+     *        enrolled; the certify leg is refused unless one of them certified the key. Pass the
+     *        alias of the device that just passed an attest challenge, so the key provably comes
+     *        from it.
+     *
+     * @throws \InvalidArgumentException if the purpose is unknown or expectedDevices is not a
+     *         non-empty list of non-empty strings; no request is made
+     */
+    public function issueKeyChallenge(string $purpose, ?array $expectedDevices = null): KeyChallenge
+    {
+        if (!in_array($purpose, self::PURPOSES, true)) {
+            throw new \InvalidArgumentException(
+                'issueKeyChallenge() requires purpose to be one of ' . implode('/', self::PURPOSES)
+            );
+        }
+        $body = ['purpose' => $purpose];
+        if ($expectedDevices !== null) {
+            $body['expectedDevices'] = self::requireAliasList($expectedDevices, 'expectedDevices');
+        }
+        $data = $this->post('/api/v1/keys/challenge', $body);
+        if (
+            !is_string($data['nonce'] ?? null)
+            || !is_string($data['keyChallenge'] ?? null)
+            || !is_string($data['expiresAt'] ?? null)
+        ) {
+            throw new HttpException(200, json_encode($data) ?: '', 'key challenge response missing nonce/keyChallenge/expiresAt');
+        }
+
+        return new KeyChallenge($data['nonce'], $data['keyChallenge'], $data['expiresAt']);
+    }
+
+    /**
+     * POST /api/v1/keys/certify — relay the client's `MintKey` output under
+     * the key challenge's nonce and return the key Root Herald registered:
+     * its keyId, public jwk, alg, and the deviceId (alias) of the
+     * installation that certified it. Store keyId and jwk against the alias;
+     * later signatures are checked locally with {@see KeySignatures::verify}.
+     *
+     * The certification is relayed verbatim, whichever platform shape it is.
+     * The key is the call's only output, so a malformed one is refused with
+     * HttpException rather than returned half-parsed.
+     *
+     * @param array<string, mixed> $certification the client's MintKey output, passed through verbatim
+     *        (wire shape: publicArea, attest, signature on a TPM; platform "macos" with publicKey,
+     *        signature; platform "ios" with keyId, assertion)
+     * @param string               $nonce         the key challenge handle from issueKeyChallenge
+     *
+     * @throws \InvalidArgumentException if the nonce is empty or the certification has none of
+     *         the three shapes; no request is made
+     */
+    public function certifyKey(array $certification, string $nonce): CertifiedKey
+    {
+        if ($nonce === '') {
+            throw new \InvalidArgumentException('certifyKey() requires a nonce (from issueKeyChallenge)');
+        }
+        if (!self::certificationIsWellFormed($certification)) {
+            throw new \InvalidArgumentException(
+                'certifyKey() requires the client\'s certification: publicArea, attest and signature on a TPM, or the platform form from macOS / iOS'
+            );
+        }
+        $data = $this->post('/api/v1/keys/certify', ['nonce' => $nonce, 'certification' => $certification]);
+        $key = CertifiedKey::fromWire($data);
+        if ($key === null) {
+            throw new HttpException(
+                200,
+                json_encode($data) ?: '',
+                'certify response is not a well-formed certified key (deviceId, keyId, purpose, alg, jwk, hardwareBound, certifiedAt)'
+            );
+        }
+
+        return $key;
+    }
+
+    /**
+     * The certification is per platform and relayed verbatim, so only its
+     * outer shape is checked: a TPM certification's three base64 strings, or
+     * a platform-tagged body from macOS or iOS.
+     *
+     * @param array<string, mixed> $certification
+     */
+    private static function certificationIsWellFormed(array $certification): bool
+    {
+        if (is_string($certification['platform'] ?? null)) {
+            return true;
+        }
+
+        return is_string($certification['publicArea'] ?? null)
+            && is_string($certification['attest'] ?? null)
+            && is_string($certification['signature'] ?? null);
     }
 
     /**
      * Enroll relay — leg 1. POST /api/v1/attest/enroll.
      *
      * Relays the client's `EnrollBegin()` blob to Root Herald with the `rh_sk_`
-     * secret and returns the {@see EnrollChallenge} to hand back to the client's
-     * `EnrollComplete`, whose result goes to {@see relayActivate}. An iOS blob
-     * (`platform: "ios"`) has no activation leg: the server answers `{}` and
-     * {@see RelayEnrollResult::$challenge} is null.
+     * secret, verbatim, and returns the {@see EnrollChallenge} to hand back to
+     * the client's `EnrollComplete`, whose result goes to {@see relayActivate}.
+     * An iOS blob (`platform: "ios"`) has no activation leg: the server
+     * answers `{}` and {@see RelayEnrollResult::$challenge} is null.
      *
-     * Nothing in the response names the device. The backend learns its alias
-     * for the device from {@see relayActivate}, or from the first verdict on
-     * iOS, and never relays it to the device.
+     * Every enroll returns a challenge, including for a device already known:
+     * each activation creates a new installation of the device with its own
+     * AK blob, which the client keeps. The device's alias is returned by
+     * {@see relayActivate}, not here, and does not change across installations.
      *
      * The client never holds the `rh_sk_` key and never talks to Root Herald;
      * this backend helper is the only thing that does.
@@ -294,22 +483,21 @@ final class Client
      * ({@see AdmissionRefusedException}, 422 admission_refused).
      *
      * @param array<string, mixed> $enrollRequestBlob opaque `EnrollBegin()` blob from the client, passed through verbatim
-     *        (wire shape: ekPublicKey, akPublicArea, platform, ekCertPem?, ekCertificateChain?, tpmSelfReport?;
-     *        on iOS: platform, iosKeyId, iosAttestationObject, nonce)
+     *        (wire shape on windows/linux: ekPublicKey, attestationKey {publicArea, parentPublicArea,
+     *        qualifiedName}, platform, ekCertPem?, ekCertificateChain?, tpmSelfReport?; on macos:
+     *        ekPublicKey, akPublicArea, platform; on ios: platform, iosKeyId, iosAttestationObject, nonce)
      *
-     * @throws \InvalidArgumentException if the blob lacks the fields its platform requires
+     * @throws \InvalidArgumentException if the blob lacks the fields its platform requires, including
+     *         a flat 7.0 TPM body with a top-level akPublicArea; no request is made
      */
     public function relayEnroll(array $enrollRequestBlob): RelayEnrollResult
     {
-        $ios = ($enrollRequestBlob['platform'] ?? null) === 'ios';
-        $required = $ios ? ['iosKeyId', 'iosAttestationObject', 'nonce'] : ['ekPublicKey', 'akPublicArea'];
-        foreach ($required as $field) {
-            if (!is_string($enrollRequestBlob[$field] ?? null)) {
-                throw new \InvalidArgumentException(
-                    'relayEnroll() requires an enroll request blob with ' . implode(', ', $required)
-                );
-            }
+        if (!self::enrollBlobIsWellFormed($enrollRequestBlob)) {
+            throw new \InvalidArgumentException(
+                'relayEnroll() requires an enroll request blob: ekPublicKey with attestationKey {publicArea, parentPublicArea, qualifiedName} (windows/linux), ekPublicKey with akPublicArea (macos), or iosKeyId, iosAttestationObject and nonce (ios)'
+            );
         }
+        $ios = $enrollRequestBlob['platform'] === 'ios';
 
         [$status, $respBody, $respHeaders] = $this->rawPost('/api/v1/attest/enroll', $enrollRequestBlob);
         if ($status >= 400) {
@@ -317,7 +505,7 @@ final class Client
         }
 
         $data = $this->decodeObject($status, $respBody);
-        if ($ios && $data === []) {
+        if ($ios && !array_key_exists('enrollmentId', $data)) {
             return new RelayEnrollResult(null);
         }
         $challenge = EnrollChallenge::fromWire($data);
@@ -330,6 +518,40 @@ final class Client
         }
 
         return new RelayEnrollResult($challenge);
+    }
+
+    /**
+     * The 8.0 TPM body nests the AK; macOS stays flat; iOS is its own shape.
+     * A flat TPM body is the 7.0 shape and is refused here rather than
+     * relayed: the server would answer wire_version_unsupported anyway, and
+     * refusing locally keeps the message specific.
+     *
+     * @param array<string, mixed> $blob
+     */
+    private static function enrollBlobIsWellFormed(array $blob): bool
+    {
+        switch ($blob['platform'] ?? null) {
+            case 'ios':
+                return is_string($blob['iosKeyId'] ?? null)
+                    && is_string($blob['iosAttestationObject'] ?? null)
+                    && is_string($blob['nonce'] ?? null);
+            case 'macos':
+                return is_string($blob['ekPublicKey'] ?? null)
+                    && is_string($blob['akPublicArea'] ?? null)
+                    && !array_key_exists('attestationKey', $blob);
+            case 'windows':
+            case 'linux':
+                $ak = $blob['attestationKey'] ?? null;
+
+                return is_string($blob['ekPublicKey'] ?? null)
+                    && is_array($ak)
+                    && is_string($ak['publicArea'] ?? null)
+                    && is_string($ak['parentPublicArea'] ?? null)
+                    && is_string($ak['qualifiedName'] ?? null)
+                    && !array_key_exists('akPublicArea', $blob);
+            default:
+                return false;
+        }
     }
 
     /**
@@ -372,6 +594,33 @@ final class Client
             is_string($data['status'] ?? null) ? $data['status'] : null,
             is_string($data['enrolledAt'] ?? null) ? $data['enrolledAt'] : null,
         );
+    }
+
+    private static function requireNonEmptyString(string $value, string $field): string
+    {
+        if ($value === '') {
+            throw new \InvalidArgumentException("{$field} must be a non-empty string");
+        }
+
+        return $value;
+    }
+
+    /**
+     * @param array<mixed> $value
+     * @return list<string>
+     */
+    private static function requireAliasList(array $value, string $field): array
+    {
+        if ($value === []) {
+            throw new \InvalidArgumentException("{$field} must be a non-empty list of non-empty strings");
+        }
+        foreach ($value as $alias) {
+            if (!is_string($alias) || $alias === '') {
+                throw new \InvalidArgumentException("{$field} must be a non-empty list of non-empty strings");
+            }
+        }
+
+        return array_values($value);
     }
 
     /**
@@ -449,6 +698,7 @@ final class Client
         $message = null;
         $code = null;
         $retryAfter = null;
+        $budget = null;
         $parsed = json_decode($body, true);
         if (is_array($parsed)) {
             foreach (['message', 'detail', 'error_description'] as $field) {
@@ -462,6 +712,10 @@ final class Client
             if (is_int($parsed['retryAfterSeconds'] ?? null)) {
                 $retryAfter = $parsed['retryAfterSeconds'];
             }
+            $refusing = $parsed['budget'] ?? null;
+            if (is_array($refusing) && is_string($refusing['id'] ?? null) && is_string($refusing['name'] ?? null)) {
+                $budget = ['id' => $refusing['id'], 'name' => $refusing['name']];
+            }
         }
         if (is_numeric(trim($headers['retry-after'] ?? ''))) {
             $retryAfter = (int) trim($headers['retry-after']);
@@ -471,9 +725,10 @@ final class Client
             $status === 401 => new InvalidSecretKeyException($status, $body, $message, $code),
             $status === 422 && $code === 'admission_refused' => new AdmissionRefusedException($status, $body, $message, $code),
             $status === 422 && ($code === null || $code === 'unknown_policy') => new UnknownPolicyException($status, $body, $message, $code),
-            $status === 409 => new ChallengeException($status, $body, $message, $code),
+            $status === 409 && $code !== 'key_rotation_conflict' => new ChallengeException($status, $body, $message, $code),
+            $status === 400 && ($code === 'invalid_ask' || $code === 'invalid_purpose') => new InvalidAskException($status, $body, $message, $code),
             $status === 400 => new InvalidEvidenceException($status, $body, $message, $code),
-            $status === 429 && ($code === 'quota_exceeded' || isset($headers[self::QUOTA_HEADER])) => new QuotaExceededException($status, $body, $message, $code),
+            $status === 429 && ($code === 'budget_exhausted' || isset($headers[self::QUOTA_HEADER])) => new QuotaExceededException($status, $body, $message, $code, $budget),
             $status === 429 => new RateLimitedException($status, $body, $message, $code, $retryAfter),
             default => new HttpException($status, $body, $message, $code),
         };
