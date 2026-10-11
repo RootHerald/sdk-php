@@ -322,15 +322,22 @@ final class Client
             throw $refuse('expectedKey');
         }
         if ($expectedDevices !== null) {
+            // Aliases are GUIDs: the server accepts any spelling and echoes lowercase.
+            $asked = array_map([self::class, 'normalizeAlias'], $expectedDevices);
             $devices = $echoed['devices'] ?? null;
-            if (!is_array($devices) || !self::sameSet($devices, $expectedDevices)) {
+            if (!is_array($devices) || !self::sameSet($devices, $asked)) {
                 throw $refuse('expectedDevices');
             }
             $ueid = $result->device()['ueid'] ?? null;
-            if ($result->verdict !== Verdict::FAIL && is_string($ueid) && !in_array($ueid, $expectedDevices, true)) {
+            if ($result->verdict !== Verdict::FAIL && is_string($ueid) && !in_array(self::normalizeAlias($ueid), $asked, true)) {
                 throw $refuse('expectedDevices');
             }
         }
+    }
+
+    private static function normalizeAlias(string $alias): string
+    {
+        return strtolower(trim($alias));
     }
 
     /**
@@ -339,7 +346,7 @@ final class Client
      */
     private static function sameSet(array $a, array $b): bool
     {
-        $seen = array_values(array_unique(array_filter($a, 'is_string')));
+        $seen = array_values(array_unique(array_map([self::class, 'normalizeAlias'], array_filter($a, 'is_string'))));
         if (count($seen) !== count(array_unique($b))) {
             return false;
         }

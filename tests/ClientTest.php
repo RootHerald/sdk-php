@@ -409,6 +409,13 @@ final class ClientTest extends TestCase
         $this->assertSame(['nonce', 'evidence'], array_keys($seen['body']));
     }
 
+    public function testVerifyComparesAliasesCaseInsensitively(): void
+    {
+        $bg = $this->bg(fn () => self::boundVerdict('pass', 'dev-9', ['devices' => ['dev-9', 'dev-10']]));
+        $result = $bg->verify([], nonce: self::NONCE, expectedDevices: [' DEV-9 ', 'Dev-10']);
+        $this->assertSame(Verdict::PASS, $result->verdict);
+    }
+
     public function testVerifyRefusesAVerdictThatDoesNotEchoTheKey(): void
     {
         foreach ([null, [], ['key' => 'key_other'], ['devices' => ['dev-9']]] as $expected) {
