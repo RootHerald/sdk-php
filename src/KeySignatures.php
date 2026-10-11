@@ -65,7 +65,7 @@ final class KeySignatures
         }
         $x = self::component($jwk['x'] ?? null, 'x', self::P256_COORDINATE);
         $y = self::component($jwk['y'] ?? null, 'y', self::P256_COORDINATE);
-        $key = self::publicKey(hex2bin(self::P256_SPKI_PREFIX) . "\x04" . $x . $y, 'EC');
+        $key = self::ecPublicKey($x, $y);
 
         if ($signature === '') {
             return false;
@@ -87,11 +87,7 @@ final class KeySignatures
     {
         $n = self::component($jwk['n'] ?? null, 'n');
         $e = self::component($jwk['e'] ?? null, 'e');
-        $rsaPublicKey = "\x30" . self::derLength(strlen(self::derInteger($n) . self::derInteger($e)))
-            . self::derInteger($n) . self::derInteger($e);
-        $bitString = "\x03" . self::derLength(strlen($rsaPublicKey) + 1) . "\x00" . $rsaPublicKey;
-        $spkiBody = hex2bin(self::RSA_ALGORITHM_IDENTIFIER) . $bitString;
-        $key = self::publicKey("\x30" . self::derLength(strlen($spkiBody)) . $spkiBody, 'RSA');
+        $key = self::rsaPublicKey($n, $e);
 
         $details = openssl_pkey_get_details($key);
         $bits = is_array($details) && is_int($details['bits'] ?? null) ? $details['bits'] : 0;
@@ -103,6 +99,32 @@ final class KeySignatures
         }
 
         return self::verifyWith($message, $signature, $key);
+    }
+
+    /**
+     * A P-256 public key from its 32-byte affine coordinates; a point off the
+     * curve is refused when OpenSSL parses it.
+     *
+     * @internal
+     */
+    public static function ecPublicKey(string $x, string $y): \OpenSSLAsymmetricKey
+    {
+        return self::publicKey(hex2bin(self::P256_SPKI_PREFIX) . "\x04" . $x . $y, 'EC');
+    }
+
+    /**
+     * An RSA public key from its big-endian modulus and exponent.
+     *
+     * @internal
+     */
+    public static function rsaPublicKey(string $n, string $e): \OpenSSLAsymmetricKey
+    {
+        $rsaPublicKey = "\x30" . self::derLength(strlen(self::derInteger($n) . self::derInteger($e)))
+            . self::derInteger($n) . self::derInteger($e);
+        $bitString = "\x03" . self::derLength(strlen($rsaPublicKey) + 1) . "\x00" . $rsaPublicKey;
+        $spkiBody = hex2bin(self::RSA_ALGORITHM_IDENTIFIER) . $bitString;
+
+        return self::publicKey("\x30" . self::derLength(strlen($spkiBody)) . $spkiBody, 'RSA');
     }
 
     private static function publicKey(string $spkiDer, string $expectedType): \OpenSSLAsymmetricKey

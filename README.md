@@ -192,6 +192,44 @@ length (256 bytes). It returns `false` for a malformed or non-matching
 signature; a JWK that is not a P-256 EC key or an RSA key of at least 2048
 bits is `\InvalidArgumentException`.
 
+## Guarantee only a device can decrypt
+
+Mint a key with `Client::PURPOSE_DECRYPT`, then encrypt to it from the
+backend; only the chip that holds the key opens the result. The private
+half, locked in the chip, signs and decrypts; the public half, in the JWK,
+verifies and encrypts.
+
+```php
+use Rootherald\Client;
+use Rootherald\DeviceEncryption;
+
+$keyChallenge = $rh->issueKeyChallenge(
+    Client::PURPOSE_DECRYPT,
+    expectedDevices: [$result->deviceId()],
+);
+$key = $rh->certifyKey($certification, $keyChallenge->nonce);
+store($key->deviceId, $key);
+
+// Later, without any Root Herald call: a session token only this device
+// can read. Send the JWE to the client; its RootHeraldDecrypt opens it.
+$jwe = DeviceEncryption::encryptToDevice($key, $sessionToken);
+```
+
+`DeviceEncryption::encryptToDevice($key, $plaintext)` returns one JWE
+compact serialization: `ECDH-ES` with a fresh ephemeral P-256 key for an EC
+key, `RSA-OAEP-256` for an RSA key, `A256GCM` for both. Anyone holding the
+JWK can encrypt to the device.
+
+TPM keys (Windows, Linux) have `$format` `'jwe'` and are what this method
+encrypts to. A macOS key has `$format` `'apple-ecies'` and needs an
+Apple-side encryptor: `encryptToDevice` throws
+`EnvelopeFormatNotSupportedException` for it. iOS mints no decrypt key. A
+sign key, a key without a format, a curve other than P-256 or an RSA modulus
+under 2048 bits is `\InvalidArgumentException`.
+
+A decrypt key minted in 8.1 has an empty auth value: any local process that
+can load the key's blob can open what was sent to it.
+
 ## Errors
 
 An un-enrolled / failing device is a verdict (`Verdict::FAIL`/`WARN`), **not**
@@ -222,7 +260,8 @@ failure. `RateLimitedException::$retryAfterSeconds` is the server's
 (`posture_not_bound`, `plan_lapsed`), is a plain `HttpException` with
 `$serverError` preserved. Input the SDK refuses locally, such as an empty
 nonce or a 7.0 enroll body, is `\InvalidArgumentException` and makes no
-request.
+request; a decrypt key whose envelope `encryptToDevice` cannot produce
+(`apple-ecies`) is `EnvelopeFormatNotSupportedException`, a subclass of it.
 
 A response whose `verdict.device.verdict` is not `pass`/`warn`/`fail`, or
 whose certified key is malformed, is refused with `HttpException` rather

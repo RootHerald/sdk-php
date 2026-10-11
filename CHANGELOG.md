@@ -9,6 +9,22 @@ ceremony. A backend on this version cannot drive a 7.0 client, and the
 reverse; the server refuses a 7.0-shaped enroll body with
 `400 wire_version_unsupported`.
 
+Wire 8.1. A decrypt key minted with `Client::PURPOSE_DECRYPT` can be
+encrypted to from the backend.
+
+### Added
+
+- `DeviceEncryption::encryptToDevice(CertifiedKey $key, string $plaintext):
+  string` returns the JWE compact serialization the device's
+  `RootHeraldDecrypt` opens: `ECDH-ES` (Concat KDF, fresh ephemeral P-256 key
+  per call) for an EC key, `RSA-OAEP-256` (OAEP SHA-256, MGF1-SHA-256,
+  encoded here over `OPENSSL_NO_PADDING` because ext-openssl's OAEP is
+  SHA-1 only) for an RSA key, `A256GCM` for both, with the protected header
+  as AAD. The header carries `alg`, `enc` and `epk` only. A sign key, a key
+  without a format, a curve other than P-256, a coordinate that is not 32
+  bytes or an RSA modulus under 2048 bits is `\InvalidArgumentException`; an
+  `apple-ecies` key is `EnvelopeFormatNotSupportedException`.
+
 ### Breaking
 
 - `Client::relayEnroll()` takes the 8.0 TPM body `{ ekPublicKey,
